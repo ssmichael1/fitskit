@@ -93,6 +93,9 @@ compress EUVEngc4151imgx.fits     gzip1  -g
 compress EUVEngc4151imgx.fits     gzip2  -g2
 # PLIO_1 targets integer (mask-like) data, <= 24-bit; fine for I16.
 compress EUVEngc4151imgx.fits     plio   -p
+# HCOMPRESS with scale 0 is LOSSLESS for integer images (no quantization step),
+# so the decode must reproduce the source pixels byte-exactly.
+compress EUVEngc4151imgx.fits     hcomp_int   -h -s 0
 # Force square tiles to exercise 2-D reassembly with edge-truncated tiles.
 compress EUVEngc4151imgx.fits     rice_t100   -r -t 100,100
 

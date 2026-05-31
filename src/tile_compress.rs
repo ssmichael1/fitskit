@@ -11,15 +11,11 @@
 //!
 //! # Status
 //!
-//! This module is being built up in phases (see `COMPRESSION_PLAN.md`):
-//!
-//! - Phase 0 (current): scaffolding + the [`rice_decompress_i32`] family of
-//!   decoders with unit tests.
-//! - Phase 1: RICE_1 integer read path ([`CompressedImage::decompress`]).
-//! - Later: GZIP_1/GZIP_2, float quantization/dithering, PLIO_1, HCOMPRESS_1, and a
-//!   compression (write) path.
-//!
-//! Most of the high-level pipeline is currently stubbed with `todo!()`.
+//! Read (decompression) support is implemented for `RICE_1`, `GZIP_1`/`GZIP_2`
+//! (behind the `gzip` feature), `PLIO_1`, `HCOMPRESS_1` (`SMOOTH=0`), and
+//! `NOCOMPRESS`, for integer originals and for quantized/lossless float originals
+//! (with `SUBTRACTIVE_DITHER_1`/`_2` reversal). The compression (write) path is
+//! not yet implemented (see `COMPRESSION_PLAN.md`).
 
 use crate::bintable::BinTable;
 use crate::error::{Error, Result};
@@ -162,6 +158,8 @@ pub struct CompressedImage<'a> {
     pub blocksize: usize,
     /// RICE `BYTEPIX` parameter (default 4).
     pub bytepix: usize,
+    /// HCOMPRESS `SMOOTH` parameter (default 0 = no smoothing).
+    pub smooth: i32,
     /// The borrowed binary table holding the compressed tiles + heap.
     /// Read once [`CompressedImage::decompress`] is implemented (phase 1).
     #[allow(dead_code)]
@@ -197,13 +195,15 @@ impl<'a> CompressedImage<'a> {
         // Default RICE parameters; overridden by ZNAMEi='BLOCKSIZE'/'BYTEPIX'.
         let mut blocksize = 32usize;
         let mut bytepix = 4usize;
+        let mut smooth = 0i32;
         let nzparams = count_zname_params(header);
         for i in 1..=nzparams {
             if let Some(name) = header.get_string(&format!("ZNAME{i}")) {
-                let val = header.get_int(&format!("ZVAL{i}")).unwrap_or(0) as usize;
+                let val = header.get_int(&format!("ZVAL{i}")).unwrap_or(0);
                 match name.trim().to_ascii_uppercase().as_str() {
-                    "BLOCKSIZE" => blocksize = val,
-                    "BYTEPIX" => bytepix = val,
+                    "BLOCKSIZE" => blocksize = val as usize,
+                    "BYTEPIX" => bytepix = val as usize,
+                    "SMOOTH" => smooth = val as i32,
                     _ => {}
                 }
             }
@@ -218,6 +218,7 @@ impl<'a> CompressedImage<'a> {
             blank,
             blocksize,
             bytepix,
+            smooth,
             table,
         })
     }
@@ -246,12 +247,15 @@ impl<'a> CompressedImage<'a> {
     /// subtractive dithering (`ZQUANTIZ` = `SUBTRACTIVE_DITHER_1`/`_2`); `ZBLANK`
     /// sentinels map to `NaN`.
     ///
-    /// # Not yet supported (see `COMPRESSION_PLAN.md`)
+    /// `PLIO_1` (IRAF pixel-list RLE) and `HCOMPRESS_1` (H-transform + quadtree)
+    /// integer tiles are decoded by their dedicated per-tile decoders and scattered
+    /// like any other integer codec.
     ///
-    /// - `PLIO_1` — phase 4.
-    /// - `HCOMPRESS_1` — phase 5.
+    /// # Not supported
+    ///
     /// - `GZIP_1`/`GZIP_2` without the `gzip` feature return
     ///   [`Error::UnsupportedCompression`].
+    /// - `HCOMPRESS_1` with `SMOOTH != 0` (smoothing) is rejected.
     pub fn decompress(&self) -> Result<crate::image_data::ImageData> {
         use crate::image_data::{ImageData, PixelData};
         use crate::types::Bitpix;
@@ -282,13 +286,26 @@ impl<'a> CompressedImage<'a> {
         let cdata_col = self.compressed_data_column()?;
 
         for tile_index in 0..num_tiles {
-            let raw = self.tile_bytes(tile_index, cdata_col)?;
             // Number of pixels in this (possibly edge-truncated) tile.
             let coords = unravel(tile_index, &tiles_per_axis);
             let tile_dims = self.tile_dims_at(&coords);
             let tile_npix: usize = tile_dims.iter().product();
 
-            let values = self.decode_tile(&raw, tile_npix)?;
+            // PLIO_1 stores its line list as a `1PI` (i16) VLA; every other codec
+            // uses a byte (`1PB`) VLA. Fetch the cell in its native form and decode.
+            let values = if self.ctype == CompressionType::Plio1 {
+                let words = self.tile_words_i16(tile_index, cdata_col)?;
+                plio_decompress(&words, tile_npix)?
+                    .into_iter()
+                    .map(|v| v as i64)
+                    .collect()
+            } else if self.ctype == CompressionType::Hcompress1 {
+                let raw = self.tile_bytes(tile_index, cdata_col)?;
+                self.decode_hcompress(&raw, &tile_dims)?
+            } else {
+                let raw = self.tile_bytes(tile_index, cdata_col)?;
+                self.decode_tile(&raw, tile_npix)?
+            };
             if values.len() != tile_npix {
                 return Err(Error::CompressionError(format!(
                     "tile {tile_index} decoded {} values, expected {tile_npix}",
@@ -378,7 +395,11 @@ impl<'a> CompressedImage<'a> {
             let tile_floats: Vec<f64> = match (zscale, zzero) {
                 // Quantized tile: COMPRESSED_DATA holds quantized integers.
                 (Some(scale), Some(zero)) if !cdata.is_empty() && is_quantized(scale) => {
-                    let q = self.decode_tile(&cdata, tile_npix)?;
+                    let q = if self.ctype == CompressionType::Hcompress1 {
+                        self.decode_hcompress(&cdata, &tile_dims)?
+                    } else {
+                        self.decode_tile(&cdata, tile_npix)?
+                    };
                     self.unquantize(&q, tile_index, scale, zero, blank, tile_npix)
                 }
                 // Unquantized tile (or whole image is lossless): raw floats live in
@@ -563,6 +584,48 @@ impl<'a> CompressedImage<'a> {
         }
     }
 
+    /// Read one tile's `1PI`/`1QI` cell as native `i16` words (PLIO_1 line list).
+    fn tile_words_i16(&self, row: usize, col: usize) -> Result<Vec<i16>> {
+        match self.table.get_cell(row, col)? {
+            crate::bintable::BinCellValue::I16(v) => Ok(v),
+            // Some writers may declare the PLIO list as a byte VLA; reinterpret as
+            // big-endian i16 pairs in that case.
+            crate::bintable::BinCellValue::Bytes(b) => Ok(b
+                .chunks_exact(2)
+                .map(|c| i16::from_be_bytes([c[0], c[1]]))
+                .collect()),
+            other => Err(Error::CompressionError(format!(
+                "PLIO_1 COMPRESSED_DATA cell is not an i16 VLA: {other:?}"
+            ))),
+        }
+    }
+
+    /// Decode one HCOMPRESS_1 tile into a flat array of `i64` integer samples
+    /// (axis-1 fastest, matching the tile's pixel layout).
+    ///
+    /// The tile dimensions (`nx`, `ny`) and digitization `scale` are read from the
+    /// encoded stream itself; `tile_dims` is `[width, height]` (axis-1 first) and is
+    /// used only to validate the decoded size. HCOMPRESS lays out its output array
+    /// with `ny` (== tile width, the FITS fast axis) varying fastest, which already
+    /// matches the axis-1-fastest order the scatter step expects.
+    fn decode_hcompress(&self, raw: &[u8], tile_dims: &[usize]) -> Result<Vec<i64>> {
+        // SMOOTH parameter (ZNAMEi='SMOOTH'); default 0.
+        let smooth = self.smooth;
+        // cfitsio uses the 32-bit H-transform (`fits_hdecompress`) only for
+        // ZBITPIX 8/16; every other original type (32-bit ints, and quantized
+        // -32/-64 floats) uses the 64-bit transform to avoid intermediate overflow.
+        let wide = !(self.zbitpix == 8 || self.zbitpix == 16);
+        let (a, nx, ny) = hcompress_decompress(raw, wide, smooth)?;
+        let tile_npix: usize = tile_dims.iter().product();
+        if nx * ny != tile_npix {
+            return Err(Error::CompressionError(format!(
+                "HCOMPRESS tile size {nx}x{ny} = {} != expected {tile_npix}",
+                nx * ny
+            )));
+        }
+        Ok(a)
+    }
+
     /// Tile dimensions at tile-grid coordinates `coords`, accounting for edge tiles
     /// that are truncated when `ZNAXISn` is not a multiple of `ZTILEn`.
     fn tile_dims_at(&self, coords: &[usize]) -> Vec<usize> {
@@ -607,11 +670,14 @@ impl<'a> CompressedImage<'a> {
                 let unshuffled = gzip2_unshuffle(&inflated, self.zbitpix_bytes());
                 self.bytes_to_ints(&unshuffled, tile_npix)
             }
-            CompressionType::Plio1 => Err(Error::UnsupportedCompression(
-                "PLIO_1 decode is phase 4 (see COMPRESSION_PLAN.md)".into(),
+            // PLIO_1 and HCOMPRESS_1 are dispatched to their dedicated per-tile
+            // decoders (`plio_decompress` / `decode_hcompress`) in `decompress` /
+            // `decompress_float`, so they never reach this generic byte path.
+            CompressionType::Plio1 => Err(Error::CompressionError(
+                "internal: PLIO_1 must be decoded via plio_decompress".into(),
             )),
-            CompressionType::Hcompress1 => Err(Error::UnsupportedCompression(
-                "HCOMPRESS_1 decode is phase 5 (see COMPRESSION_PLAN.md)".into(),
+            CompressionType::Hcompress1 => Err(Error::CompressionError(
+                "internal: HCOMPRESS_1 must be decoded via decode_hcompress".into(),
             )),
         }
     }
@@ -1091,9 +1157,930 @@ fn gzip2_unshuffle(shuffled: &[u8], _bytepix: usize) -> Vec<u8> {
     shuffled.to_vec()
 }
 
-/// Decompress a PLIO_1 (IRAF pixel-list RLE) tile into i32 mask values. TODO(phase 4).
-pub fn plio_decompress(_src: &[u8], _nvals: usize) -> Result<Vec<i32>> {
-    todo!("phase 4: PLIO_1 pixel-list decode")
+// ---------------------------------------------------------------------------
+// PLIO_1 decompression (IRAF pixel-list run-length encoding)
+// ---------------------------------------------------------------------------
+//
+// Port of cfitsio `pliocomp.c` `pl_l2pi` (D. Tody, NRAO; the IRAF PLIO scheme).
+// A tile is stored as a *line list*: a stream of 16-bit instruction words. Each
+// word is `(opcode << 12) | data`, where `opcode` is the high nibble (0..15) and
+// `data` is the low 12 bits. The list reconstructs a 1-D run of `npix`
+// non-negative integers ("pixels"), tracking a running "high value" `pv`.
+//
+// In the FITS tiled-image convention the line list is stored in the
+// `COMPRESSED_DATA` column as a `1PI`/`1QI` variable-length array of *big-endian*
+// 16-bit values (cfitsio reads it with `fits_read_col(TSHORT, ...)`), so the
+// caller hands us the already-byte-swapped `i16` words.
+//
+// Opcodes (after cfitsio's `opcode = word/4096; data = word & 4095`; the C switch
+// is on `opcode+1`, reproduced here on `opcode` directly):
+//   * 0  (Z run)         — `data` zeros.
+//   * 1  (HD, high+data) — set high value: `pv = (next_word << 12) + data`; the
+//                          following word is consumed as the high bits.
+//   * 2  (IH, inc high)  — `pv += data`.
+//   * 3  (DH, dec high)  — `pv -= data`.
+//   * 4  (PD, pixel data)— `data` pixels at value `pv`.
+//   * 5  (PS, pixel set) — `data` zeros, then the *last* pixel of the run is set
+//                          to `pv` (single non-zero pixel at the end of the span).
+//   * 6  (IS, inc set)   — `pv += data`, then emit one pixel at `pv`.
+//   * 7  (DS, dec set)   — `pv -= data`, then emit one pixel at `pv`.
+// (cfitsio's switch maps opcodes 0,4,5 all through the "run of length `data`"
+// label L160; opcode 0 is a pure zero run, 4 fills with `pv`, 5 fills with zeros
+// then sets the last element. Opcodes 1..3 adjust `pv` without emitting span
+// pixels, and 6/7 adjust `pv` and emit a single pixel.)
+
+/// Decompress a PLIO_1 (IRAF pixel-list RLE) tile into `nvals` `i32` values.
+///
+/// `words` is the line-list instruction stream (already decoded from the
+/// big-endian `1PI` VLA into native `i16`). Pixels are non-negative; any pixels
+/// not explicitly written are zero.
+pub fn plio_decompress(words: &[i16], nvals: usize) -> Result<Vec<i32>> {
+    // Treat the instruction words as unsigned 16-bit (the high nibble is the
+    // opcode; PLIO values never use the sign bit).
+    let w: Vec<u32> = words.iter().map(|&v| (v as u16) as u32).collect();
+
+    let mut out = vec![0i32; nvals];
+    if nvals == 0 {
+        return Ok(out);
+    }
+    if w.len() < 3 {
+        return Err(Error::CompressionError(
+            "PLIO_1 line list too short (need >= 3 header words)".into(),
+        ));
+    }
+
+    // List length and index of the first instruction word (cfitsio uses 1-based
+    // indices via `--ll_src`; here `w[0]` == cfitsio `ll_src[1]`, so cfitsio
+    // `ll_src[k]` == `w[k-1]`).
+    //
+    //   if ll_src[3] > 0:   lllen = ll_src[3];                 llfirt = 4
+    //   else:               lllen = (ll_src[5]<<15)+ll_src[4]; llfirt = ll_src[2]+1
+    // The `ll_src[3] > 0` test is a SIGNED 16-bit comparison: the standard PLIO
+    // header stores -100 there, so the long form (else branch) is the usual path.
+    let (lllen, llfirt) = if words[2] > 0 {
+        (w[2] as usize, 4usize)
+    } else {
+        if w.len() < 5 {
+            return Err(Error::CompressionError(
+                "PLIO_1 long-form line list too short".into(),
+            ));
+        }
+        let len = ((w[4] << 15) + w[3]) as usize;
+        (len, (w[1] as usize) + 1)
+    };
+
+    if lllen == 0 {
+        return Ok(out); // empty list => all zeros
+    }
+
+    // Pixel-output cursor `op` (1-based in cfitsio; `op==1` means out[0]).
+    let mut op: usize = 1; // index into 1-based px_dst
+    let mut x1: i64 = 1; // current x position (1-based)
+    let mut pv: i64 = 1; // running "high value"
+    let xs: i64 = 1; // starting index (cfitsio passes xs=1)
+    let xe: i64 = nvals as i64; // end index inclusive
+
+    let put = |out: &mut [i32], op: usize, v: i64| {
+        // 1-based op -> 0-based; ignore writes past the tile (defensive).
+        if op >= 1 && op <= out.len() {
+            out[op - 1] = v as i32;
+        }
+    };
+
+    // ip iterates cfitsio ll_src indices llfirt..=lllen (1-based) => w[ip-1].
+    let mut ip = llfirt;
+    let mut skipwd = false;
+    'outer: while ip <= lllen {
+        if ip == 0 || ip > w.len() {
+            break;
+        }
+        if skipwd {
+            skipwd = false;
+            ip += 1;
+            continue;
+        }
+        let word = w[ip - 1];
+        let opcode = word / 4096;
+        let data = (word & 4095) as i64;
+
+        match opcode {
+            // L160: run of length `data` (opcodes 0, 4, 5).
+            0 | 4 | 5 => {
+                let x2 = x1 + data - 1;
+                let i1 = x1.max(xs);
+                let i2 = x2.min(xe);
+                let np = i2 - i1 + 1;
+                if np > 0 {
+                    let otop = op as i64 + np - 1;
+                    if opcode == 4 {
+                        for i in op..=(otop as usize) {
+                            put(&mut out, i, pv);
+                        }
+                    } else {
+                        // opcodes 0 and 5: zeros (out is already zero-initialized).
+                        if opcode == 5 && i2 == x2 {
+                            put(&mut out, otop as usize, pv);
+                        }
+                    }
+                    op = (otop + 1) as usize;
+                }
+                x1 = x2 + 1;
+            }
+            // L220: set high value from this+next word.
+            1 => {
+                if ip >= w.len() {
+                    return Err(Error::CompressionError(
+                        "PLIO_1 truncated high-value instruction".into(),
+                    ));
+                }
+                pv = ((w[ip] as i64) << 12) + data;
+                skipwd = true;
+            }
+            // L230: increment high value.
+            2 => {
+                pv += data;
+            }
+            // L240: decrement high value.
+            3 => {
+                pv -= data;
+            }
+            // L250: increment high value and emit one pixel.
+            6 => {
+                pv += data;
+                if x1 >= xs && x1 <= xe {
+                    put(&mut out, op, pv);
+                    op += 1;
+                }
+                x1 += 1;
+            }
+            // L260: decrement high value and emit one pixel.
+            7 => {
+                pv -= data;
+                if x1 >= xs && x1 <= xe {
+                    put(&mut out, op, pv);
+                    op += 1;
+                }
+                x1 += 1;
+            }
+            _ => {
+                // opcodes 8..15 are unused by the encoder; cfitsio falls through
+                // (no-op) on them. Match that behaviour.
+            }
+        }
+
+        if x1 > xe {
+            break 'outer;
+        }
+        ip += 1;
+    }
+
+    // Remaining pixels are zero (already initialized).
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// HCOMPRESS_1 decompression
+// ---------------------------------------------------------------------------
+//
+// Port of cfitsio `fits_hdecompress` / `fits_hdecompress64` (the concatenation of
+// R. White's hinv.c / undigitize.c / decode.c / dodecode.c / qtree_decode.c /
+// qread.c / bit_input.c in STScI's hcompress distribution).
+//
+// Pipeline (read direction):
+//   1. `decode`  — parse the byte stream header (2-byte magic 0xDD 0x99, then
+//      big-endian `nx`, `ny`, `scale` as 4-byte ints, an 8-byte `sumall`, and a
+//      3-byte `nbitplanes`), then `dodecode` the quadtree-coded bit planes of the
+//      four image quadrants into the transform-coefficient array `a`, and finally
+//      the per-element sign bits. `a[0]` is overwritten with `sumall`.
+//   2. `undigitize` — multiply every coefficient by `scale` (the quantization
+//      step; `scale <= 1` is a no-op, i.e. lossless).
+//   3. `hinv` — inverse H-transform, expanding the coefficients back into pixels.
+//
+// The array `a` is indexed as `a[i*ny + j]` (ny = fast axis = FITS axis-1 width),
+// so its flat order already matches the tile's axis-1-fastest pixel layout.
+//
+// cfitsio uses 32-bit ints for ZBITPIX 8/16 and 64-bit ints for everything else
+// (incl. quantized floats), because the H-transform intermediate sums can exceed
+// 32 bits. We reproduce both via a macro, using wrapping arithmetic to match C's
+// 2's-complement overflow behaviour exactly.
+
+/// Bit/byte reader for the HCOMPRESS stream (mirrors cfitsio's global
+/// `nextchar` + `buffer2`/`bits_to_go` state machine, but as a struct).
+struct HcInput<'a> {
+    data: &'a [u8],
+    nextchar: usize,
+    buffer2: i32,
+    bits_to_go: i32,
+}
+
+impl<'a> HcInput<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        HcInput {
+            data,
+            nextchar: 0,
+            buffer2: 0,
+            bits_to_go: 0,
+        }
+    }
+
+    #[inline]
+    fn next_byte(&mut self) -> Result<i32> {
+        let b = *self
+            .data
+            .get(self.nextchar)
+            .ok_or_else(|| Error::CompressionError("HCOMPRESS: unexpected end of stream".into()))?;
+        self.nextchar += 1;
+        Ok(b as i32)
+    }
+
+    /// Read `n` raw bytes (no bit buffering); cfitsio `qread`.
+    fn qread(&mut self, n: usize) -> Result<&[u8]> {
+        let start = self.nextchar;
+        let end = start + n;
+        if end > self.data.len() {
+            return Err(Error::CompressionError(
+                "HCOMPRESS: unexpected end of stream (qread)".into(),
+            ));
+        }
+        self.nextchar = end;
+        Ok(&self.data[start..end])
+    }
+
+    /// Read a big-endian 4-byte int (cfitsio `readint`).
+    fn readint(&mut self) -> Result<i32> {
+        let b = self.qread(4)?;
+        let mut a = b[0] as i32;
+        for &x in &b[1..4] {
+            a = (a << 8) + x as i32;
+        }
+        Ok(a)
+    }
+
+    /// Read a big-endian 8-byte long long (cfitsio `readlonglong`).
+    fn readlonglong(&mut self) -> Result<i64> {
+        let b = self.qread(8)?;
+        let mut a = b[0] as i64;
+        for &x in &b[1..8] {
+            a = (a << 8) + x as i64;
+        }
+        Ok(a)
+    }
+
+    fn start_inputing_bits(&mut self) {
+        self.bits_to_go = 0;
+    }
+
+    fn input_bit(&mut self) -> Result<i32> {
+        if self.bits_to_go == 0 {
+            self.buffer2 = self.next_byte()?;
+            self.bits_to_go = 8;
+        }
+        self.bits_to_go -= 1;
+        Ok((self.buffer2 >> self.bits_to_go) & 1)
+    }
+
+    fn input_nbits(&mut self, n: i32) -> Result<i32> {
+        if self.bits_to_go < n {
+            self.buffer2 = (self.buffer2 << 8) | self.next_byte()?;
+            self.bits_to_go += 8;
+        }
+        self.bits_to_go -= n;
+        Ok((self.buffer2 >> self.bits_to_go) & ((1 << n) - 1))
+    }
+
+    #[inline]
+    fn input_nybble(&mut self) -> Result<i32> {
+        self.input_nbits(4)
+    }
+
+    /// Read `n` 4-bit nybbles into `array` (cfitsio `input_nnybble`).
+    fn input_nnybble(&mut self, n: usize, array: &mut [u8]) -> Result<()> {
+        if n == 1 {
+            array[0] = self.input_nybble()? as u8;
+            return Ok(());
+        }
+        if self.bits_to_go == 8 {
+            // Backspace to reuse the last char (cfitsio quirk).
+            self.nextchar -= 1;
+            self.bits_to_go = 0;
+        }
+        let shift1 = self.bits_to_go + 4;
+        let shift2 = self.bits_to_go;
+        let mut kk = 0usize;
+        let mut ii = 0usize;
+        if self.bits_to_go == 0 {
+            while ii < n / 2 {
+                self.buffer2 = (self.buffer2 << 8) | self.next_byte()?;
+                array[kk] = ((self.buffer2 >> 4) & 15) as u8;
+                array[kk + 1] = (self.buffer2 & 15) as u8;
+                kk += 2;
+                ii += 1;
+            }
+        } else {
+            while ii < n / 2 {
+                self.buffer2 = (self.buffer2 << 8) | self.next_byte()?;
+                array[kk] = ((self.buffer2 >> shift1) & 15) as u8;
+                array[kk + 1] = ((self.buffer2 >> shift2) & 15) as u8;
+                kk += 2;
+                ii += 1;
+            }
+        }
+        if ii * 2 != n {
+            array[n - 1] = self.input_nybble()? as u8;
+        }
+        Ok(())
+    }
+
+    /// Huffman decode of a 4-bit code (cfitsio `input_huffman`).
+    fn input_huffman(&mut self) -> Result<i32> {
+        let mut c = self.input_nbits(3)?;
+        if c < 4 {
+            return Ok(1 << c);
+        }
+        c = self.input_bit()? | (c << 1);
+        if c < 13 {
+            match c {
+                8 => return Ok(3),
+                9 => return Ok(5),
+                10 => return Ok(10),
+                11 => return Ok(12),
+                12 => return Ok(15),
+                _ => {}
+            }
+        }
+        c = self.input_bit()? | (c << 1);
+        if c < 31 {
+            match c {
+                26 => return Ok(6),
+                27 => return Ok(7),
+                28 => return Ok(9),
+                29 => return Ok(11),
+                30 => return Ok(13),
+                _ => {}
+            }
+        }
+        c = self.input_bit()? | (c << 1);
+        if c == 62 {
+            Ok(0)
+        } else {
+            Ok(14)
+        }
+    }
+}
+
+/// Expand 4-bit quadtree values from `a[(nx+1)/2,(ny+1)/2]` into `b[nx,ny]`
+/// (2x2 per value); cfitsio `qtree_copy`. `a` and `b` are the same buffer here, so
+/// we operate in place exactly as the C does (iterating from the end first).
+fn qtree_copy(buf: &mut [u8], nx: usize, ny: usize, n: usize) {
+    let nx2 = nx.div_ceil(2);
+    let ny2 = ny.div_ceil(2);
+    // Copy 4-bit values to b, from the end (a,b same array).
+    // k is index of a[i,j]; s00 is index of b[2*i,2*j].
+    let mut k = (ny2 * (nx2 - 1) + ny2 - 1) as isize;
+    for i in (0..nx2).rev() {
+        let mut s00 = (2 * (n * i + ny2 - 1)) as isize;
+        for _j in (0..ny2).rev() {
+            buf[s00 as usize] = buf[k as usize];
+            k -= 1;
+            s00 -= 2;
+        }
+    }
+    // Expand each 2x2 block. Mapping: bit3->b[s00], bit2->b[s00+1],
+    // bit1->b[s10], bit0->b[s10+1] where s10 = s00+n.
+    let mut i = 0usize;
+    while i + 1 < nx {
+        let mut s00 = n * i;
+        let s10base = s00 + n;
+        let mut s10 = s10base;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            let v = buf[s00];
+            buf[s10 + 1] = v & 1;
+            buf[s10] = (v >> 1) & 1;
+            buf[s00 + 1] = (v >> 2) & 1;
+            buf[s00] = (v >> 3) & 1;
+            s00 += 2;
+            s10 += 2;
+            j += 2;
+        }
+        if j < ny {
+            // odd row length
+            let v = buf[s00];
+            buf[s10] = (v >> 1) & 1;
+            buf[s00] = (v >> 3) & 1;
+        }
+        i += 2;
+    }
+    if i < nx {
+        // odd column length: last row, s10 off edge
+        let mut s00 = n * i;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            let v = buf[s00];
+            buf[s00 + 1] = (v >> 2) & 1;
+            buf[s00] = (v >> 3) & 1;
+            s00 += 2;
+            j += 2;
+        }
+        if j < ny {
+            let v = buf[s00];
+            buf[s00] = (v >> 3) & 1;
+        }
+    }
+}
+
+/// One quadtree expansion step (cfitsio `qtree_expand`): copy+expand then read a
+/// fresh Huffman code into every non-zero element (scanning from the end).
+fn qtree_expand(input: &mut HcInput, buf: &mut [u8], nx: usize, ny: usize) -> Result<()> {
+    qtree_copy(buf, nx, ny, ny);
+    for i in (0..nx * ny).rev() {
+        if buf[i] != 0 {
+            buf[i] = input.input_huffman()? as u8;
+        }
+    }
+    Ok(())
+}
+
+macro_rules! impl_hdecompress {
+    ($name:ident, $t:ty, $bitins:ident, $read_bdirect:ident, $qtree_decode:ident,
+     $dodecode:ident, $hinv:ident, $undigitize:ident, $unshuffle:ident) => {
+        /// Distribute even/odd interleaved coefficients (cfitsio `unshuffle`).
+        /// `offset` is the base index into `a`; pointer arithmetic is done in
+        /// `isize` so the trailing (unused) decrements can go negative as in C.
+        fn $unshuffle(a: &mut [$t], offset: usize, n: usize, n2: usize, tmp: &mut [$t]) {
+            let base = offset as isize;
+            let n2i = n2 as isize;
+            let nhalf = (n + 1) >> 1;
+            // copy 2nd half of array to tmp
+            let mut p1 = base + n2i * nhalf as isize;
+            for slot in tmp.iter_mut().take(n - nhalf) {
+                *slot = a[p1 as usize];
+                p1 += n2i;
+            }
+            // distribute 1st half to even elements (descending)
+            let mut p2 = base + n2i * (nhalf as isize - 1);
+            let mut p1e = base + ((n2i * (nhalf as isize - 1)) << 1);
+            let mut i = nhalf as isize - 1;
+            while i >= 0 {
+                a[p1e as usize] = a[p2 as usize];
+                p2 -= n2i;
+                p1e -= n2i + n2i;
+                i -= 1;
+            }
+            // distribute 2nd half (tmp) to odd elements
+            let mut p1o = base + n2i;
+            let mut pt = 0usize;
+            let mut i = 1usize;
+            while i < n {
+                a[p1o as usize] = tmp[pt];
+                p1o += n2i + n2i;
+                pt += 1;
+                i += 2;
+            }
+        }
+
+        /// Insert expanded 4-bit codes from `aa[(nx+1)/2,(ny+1)/2]` into bitplane
+        /// `bit` of `b[nx,ny]` (cfitsio `qtree_bitins`).
+        fn $bitins(aa: &[u8], nx: usize, ny: usize, b: &mut [$t], n: usize, bit: i32) {
+            let plane_val: $t = (1 as $t) << bit;
+            let mut k = 0usize;
+            let mut i = 0usize;
+            while i + 1 < nx {
+                let s00 = n * i;
+                let mut s00 = s00;
+                let mut j = 0usize;
+                while j + 1 < ny {
+                    let v = aa[k];
+                    if v & 1 != 0 {
+                        b[s00 + n + 1] |= plane_val;
+                    }
+                    if v & 2 != 0 {
+                        b[s00 + n] |= plane_val;
+                    }
+                    if v & 4 != 0 {
+                        b[s00 + 1] |= plane_val;
+                    }
+                    if v & 8 != 0 {
+                        b[s00] |= plane_val;
+                    }
+                    s00 += 2;
+                    k += 1;
+                    j += 2;
+                }
+                if j < ny {
+                    // odd row: s00+1, s10+1 off edge -> only bits 1 (s10) and 3 (s00)
+                    let v = aa[k];
+                    if v & 2 != 0 {
+                        b[s00 + n] |= plane_val;
+                    }
+                    if v & 8 != 0 {
+                        b[s00] |= plane_val;
+                    }
+                    k += 1;
+                }
+                i += 2;
+            }
+            if i < nx {
+                // odd column: last row, s10 off edge -> bits 2 (s00+1) and 3 (s00)
+                let mut s00 = n * i;
+                let mut j = 0usize;
+                while j + 1 < ny {
+                    let v = aa[k];
+                    if v & 4 != 0 {
+                        b[s00 + 1] |= plane_val;
+                    }
+                    if v & 8 != 0 {
+                        b[s00] |= plane_val;
+                    }
+                    s00 += 2;
+                    k += 1;
+                    j += 2;
+                }
+                if j < ny {
+                    // corner: only bit 3 (s00)
+                    let v = aa[k];
+                    if v & 8 != 0 {
+                        b[s00] |= plane_val;
+                    }
+                    k += 1;
+                }
+            }
+            let _ = k;
+        }
+
+        /// Read a directly-stored bit plane and insert it (cfitsio `read_bdirect`).
+        fn $read_bdirect(
+            input: &mut HcInput,
+            a: &mut [$t],
+            n: usize,
+            nqx: usize,
+            nqy: usize,
+            scratch: &mut [u8],
+            bit: i32,
+        ) -> Result<()> {
+            let cnt = nqx.div_ceil(2) * nqy.div_ceil(2);
+            input.input_nnybble(cnt, scratch)?;
+            $bitins(scratch, nqx, nqy, a, n, bit);
+            Ok(())
+        }
+
+        /// Decode the quadtree-coded bit planes of one quadrant (cfitsio
+        /// `qtree_decode`).
+        fn $qtree_decode(
+            input: &mut HcInput,
+            a: &mut [$t],
+            a_off: usize,
+            n: usize,
+            nqx: usize,
+            nqy: usize,
+            nbitplanes: i32,
+        ) -> Result<()> {
+            let nqmax = nqx.max(nqy);
+            let mut log2n = ((nqmax as f32).ln() / 2.0f32.ln() + 0.5) as i32;
+            if nqmax > (1usize << log2n) {
+                log2n += 1;
+            }
+            let nqx2 = nqx.div_ceil(2);
+            let nqy2 = nqy.div_ceil(2);
+            let mut scratch = vec![0u8; nqx2 * nqy2 + 4];
+
+            let asl = &mut a[a_off..];
+
+            let mut bit = nbitplanes - 1;
+            while bit >= 0 {
+                let b = input.input_nybble()?;
+                if b == 0 {
+                    $read_bdirect(input, asl, n, nqx, nqy, &mut scratch, bit)?;
+                } else if b != 0xf {
+                    return Err(Error::CompressionError(
+                        "qtree_decode: bad format code".into(),
+                    ));
+                } else {
+                    scratch[0] = input.input_huffman()? as u8;
+                    let mut nx = 1usize;
+                    let mut ny = 1usize;
+                    let mut nfx = nqx;
+                    let mut nfy = nqy;
+                    let mut c = 1usize << log2n;
+                    let mut k = 1;
+                    while k < log2n {
+                        c >>= 1;
+                        nx <<= 1;
+                        ny <<= 1;
+                        if nfx <= c {
+                            nx -= 1;
+                        } else {
+                            nfx -= c;
+                        }
+                        if nfy <= c {
+                            ny -= 1;
+                        } else {
+                            nfy -= c;
+                        }
+                        qtree_expand(input, &mut scratch, nx, ny)?;
+                        k += 1;
+                    }
+                    $bitins(&scratch, nqx, nqy, asl, n, bit);
+                }
+                bit -= 1;
+            }
+            Ok(())
+        }
+
+        /// Decode the four quadrants into coefficient array `a` (cfitsio
+        /// `dodecode`).
+        fn $dodecode(
+            input: &mut HcInput,
+            a: &mut [$t],
+            nx: usize,
+            ny: usize,
+            nbitplanes: [u8; 3],
+        ) -> Result<()> {
+            let nel = nx * ny;
+            let nx2 = nx.div_ceil(2);
+            let ny2 = ny.div_ceil(2);
+            for v in a.iter_mut().take(nel) {
+                *v = 0 as $t;
+            }
+            input.start_inputing_bits();
+            $qtree_decode(input, a, 0, ny, nx2, ny2, nbitplanes[0] as i32)?;
+            $qtree_decode(input, a, ny2, ny, nx2, ny / 2, nbitplanes[1] as i32)?;
+            $qtree_decode(input, a, ny * nx2, ny, nx / 2, ny2, nbitplanes[1] as i32)?;
+            $qtree_decode(
+                input,
+                a,
+                ny * nx2 + ny2,
+                ny,
+                nx / 2,
+                ny / 2,
+                nbitplanes[2] as i32,
+            )?;
+            if input.input_nybble()? != 0 {
+                return Err(Error::CompressionError(
+                    "dodecode: bad bit plane values (missing EOF)".into(),
+                ));
+            }
+            // sign bits
+            input.start_inputing_bits();
+            for v in a.iter_mut().take(nel) {
+                if *v != 0 as $t && input.input_bit()? != 0 {
+                    *v = (0 as $t).wrapping_sub(*v);
+                }
+            }
+            Ok(())
+        }
+
+        fn $undigitize(a: &mut [$t], nel: usize, scale: i32) {
+            if scale <= 1 {
+                return;
+            }
+            let s = scale as $t;
+            for v in a.iter_mut().take(nel) {
+                *v = (*v).wrapping_mul(s);
+            }
+        }
+
+        /// Inverse H-transform (cfitsio `hinv`). `smooth` is unsupported (the
+        /// fixtures use SMOOTH=0); a non-zero value is rejected by the caller.
+        fn $hinv(a: &mut [$t], nx: usize, ny: usize) {
+            let nmax = nx.max(ny);
+            let mut log2n = ((nmax as f32).ln() / 2.0f32.ln() + 0.5) as i32;
+            if nmax > (1usize << log2n) {
+                log2n += 1;
+            }
+            let nmax_i = nmax;
+            let mut tmp = vec![0 as $t; nmax_i.div_ceil(2) + 1];
+
+            let mut shift: i32 = 1;
+            let mut bit0: $t = (1 as $t) << (log2n - 1);
+            let mut bit1: $t = bit0 << 1;
+            let mut bit2: $t = bit0 << 2;
+            let mut mask0: $t = (0 as $t).wrapping_sub(bit0);
+            let mut mask1: $t = mask0 << 1;
+            let mask2: $t = mask0 << 2;
+            let mut prnd0: $t = bit0 >> 1;
+            let mut prnd1: $t = bit1 >> 1;
+            let prnd2: $t = bit2 >> 1;
+            let mut nrnd0: $t = prnd0 - 1;
+            let mut nrnd1: $t = prnd1 - 1;
+            let nrnd2: $t = prnd2 - 1;
+
+            // round h0 to multiple of bit2
+            a[0] = (a[0].wrapping_add(if a[0] >= 0 as $t { prnd2 } else { nrnd2 })) & mask2;
+
+            let ny_i = ny as isize;
+            let mut nxtop = 1usize;
+            let mut nytop = 1usize;
+            let mut nxf = nx;
+            let mut nyf = ny;
+            let mut c = 1usize << log2n;
+            let mut k = log2n - 1;
+            while k >= 0 {
+                c >>= 1;
+                nxtop <<= 1;
+                nytop <<= 1;
+                if nxf <= c {
+                    nxtop -= 1;
+                } else {
+                    nxf -= c;
+                }
+                if nyf <= c {
+                    nytop -= 1;
+                } else {
+                    nyf -= c;
+                }
+                if k == 0 {
+                    nrnd0 = 0 as $t;
+                    shift = 2;
+                }
+                // unshuffle in each dimension
+                for i in 0..nxtop {
+                    $unshuffle(a, ny * i, nytop, 1, &mut tmp);
+                }
+                for j in 0..nytop {
+                    $unshuffle(a, j, nxtop, ny, &mut tmp);
+                }
+                let oddx = nxtop % 2;
+                let oddy = nytop % 2;
+                let mut i = 0usize;
+                while i + oddx < nxtop {
+                    // i steps by 2 over 0..nxtop-oddx
+                    let mut s00 = (ny * i) as isize;
+                    let mut s10 = s00 + ny_i;
+                    let mut j = 0usize;
+                    while j + oddy < nytop {
+                        let mut h0 = a[s00 as usize];
+                        let mut hx = a[s10 as usize];
+                        let mut hy = a[(s00 + 1) as usize];
+                        let mut hc = a[(s10 + 1) as usize];
+                        hx = (hx.wrapping_add(if hx >= 0 as $t { prnd1 } else { nrnd1 })) & mask1;
+                        hy = (hy.wrapping_add(if hy >= 0 as $t { prnd1 } else { nrnd1 })) & mask1;
+                        hc = (hc.wrapping_add(if hc >= 0 as $t { prnd0 } else { nrnd0 })) & mask0;
+                        let lowbit0 = hc & bit0;
+                        hx = if hx >= 0 as $t {
+                            hx.wrapping_sub(lowbit0)
+                        } else {
+                            hx.wrapping_add(lowbit0)
+                        };
+                        hy = if hy >= 0 as $t {
+                            hy.wrapping_sub(lowbit0)
+                        } else {
+                            hy.wrapping_add(lowbit0)
+                        };
+                        let lowbit1 = (hc ^ hx ^ hy) & bit1;
+                        h0 = if h0 >= 0 as $t {
+                            h0.wrapping_add(lowbit0).wrapping_sub(lowbit1)
+                        } else {
+                            h0.wrapping_add(if lowbit0 == 0 as $t {
+                                lowbit1
+                            } else {
+                                lowbit0.wrapping_sub(lowbit1)
+                            })
+                        };
+                        a[(s10 + 1) as usize] =
+                            (h0.wrapping_add(hx).wrapping_add(hy).wrapping_add(hc)) >> shift;
+                        a[s10 as usize] =
+                            (h0.wrapping_add(hx).wrapping_sub(hy).wrapping_sub(hc)) >> shift;
+                        a[(s00 + 1) as usize] =
+                            (h0.wrapping_sub(hx).wrapping_add(hy).wrapping_sub(hc)) >> shift;
+                        a[s00 as usize] =
+                            (h0.wrapping_sub(hx).wrapping_sub(hy).wrapping_add(hc)) >> shift;
+                        s00 += 2;
+                        s10 += 2;
+                        j += 2;
+                    }
+                    if oddy != 0 {
+                        let mut h0 = a[s00 as usize];
+                        let mut hx = a[s10 as usize];
+                        hx = (hx.wrapping_add(if hx >= 0 as $t { prnd1 } else { nrnd1 })) & mask1;
+                        let lowbit1 = hx & bit1;
+                        h0 = if h0 >= 0 as $t {
+                            h0.wrapping_sub(lowbit1)
+                        } else {
+                            h0.wrapping_add(lowbit1)
+                        };
+                        a[s10 as usize] = (h0.wrapping_add(hx)) >> shift;
+                        a[s00 as usize] = (h0.wrapping_sub(hx)) >> shift;
+                    }
+                    i += 2;
+                }
+                if oddx != 0 {
+                    let mut s00 = (ny * i) as isize;
+                    let mut j = 0usize;
+                    while j + oddy < nytop {
+                        let mut h0 = a[s00 as usize];
+                        let mut hy = a[(s00 + 1) as usize];
+                        hy = (hy.wrapping_add(if hy >= 0 as $t { prnd1 } else { nrnd1 })) & mask1;
+                        let lowbit1 = hy & bit1;
+                        h0 = if h0 >= 0 as $t {
+                            h0.wrapping_sub(lowbit1)
+                        } else {
+                            h0.wrapping_add(lowbit1)
+                        };
+                        a[(s00 + 1) as usize] = (h0.wrapping_add(hy)) >> shift;
+                        a[s00 as usize] = (h0.wrapping_sub(hy)) >> shift;
+                        s00 += 2;
+                        j += 2;
+                    }
+                    if oddy != 0 {
+                        let h0 = a[s00 as usize];
+                        a[s00 as usize] = h0 >> shift;
+                    }
+                }
+                // divide masks/rounding by 2
+                bit2 = bit1;
+                bit1 = bit0;
+                bit0 >>= 1;
+                mask1 = mask0;
+                mask0 >>= 1;
+                prnd1 = prnd0;
+                prnd0 >>= 1;
+                nrnd1 = nrnd0;
+                nrnd0 = prnd0 - 1;
+                k -= 1;
+            }
+            let _ = (bit2, mask1, prnd1, nrnd1);
+        }
+
+        /// Full HCOMPRESS decode for one quadrant-int width. Returns the pixel
+        /// array (axis-1 fastest) along with `(nx_slow, ny_fast)`.
+        fn $name(input: &mut HcInput, smooth: i32) -> Result<(Vec<$t>, usize, usize)> {
+            // magic code
+            let magic = input.qread(2)?;
+            if magic != [0xDDu8, 0x99u8] {
+                return Err(Error::CompressionError(
+                    "HCOMPRESS: bad magic code".into(),
+                ));
+            }
+            let nx = input.readint()? as usize; // slow axis
+            let ny = input.readint()? as usize; // fast axis
+            let scale = input.readint()?;
+            let nel = nx.checked_mul(ny).ok_or_else(|| {
+                Error::CompressionError("HCOMPRESS: dimension overflow".into())
+            })?;
+            let sumall = input.readlonglong()?;
+            let nbp = input.qread(3)?;
+            let nbitplanes = [nbp[0], nbp[1], nbp[2]];
+
+            let mut a = vec![0 as $t; nel.max(1)];
+            $dodecode(input, &mut a, nx, ny, nbitplanes)?;
+            // put sum of all pixels back into pixel 0
+            a[0] = sumall as $t;
+
+            if smooth != 0 {
+                return Err(Error::UnsupportedCompression(
+                    "HCOMPRESS_1 SMOOTH != 0 is not supported".into(),
+                ));
+            }
+            $undigitize(&mut a, nel, scale);
+            $hinv(&mut a, nx, ny);
+            Ok((a, nx, ny))
+        }
+    };
+}
+
+impl_hdecompress!(
+    hdecode32,
+    i32,
+    qtree_bitins32,
+    read_bdirect32,
+    qtree_decode32,
+    dodecode32,
+    hinv32,
+    undigitize32,
+    unshuffle32
+);
+impl_hdecompress!(
+    hdecode64,
+    i64,
+    qtree_bitins64,
+    read_bdirect64,
+    qtree_decode64,
+    dodecode64,
+    hinv64,
+    undigitize64,
+    unshuffle64
+);
+
+/// Decompress one HCOMPRESS_1 tile.
+///
+/// `wide` selects the 64-bit transform (used for ZBITPIX 32 and quantized
+/// -32/-64 floats; cfitsio uses the 32-bit transform only for ZBITPIX 8/16).
+/// Returns the decoded integer samples (axis-1 fastest) and the `(nx_slow,
+/// ny_fast)` dimensions read from the stream.
+pub fn hcompress_decompress(
+    src: &[u8],
+    wide: bool,
+    smooth: i32,
+) -> Result<(Vec<i64>, usize, usize)> {
+    let mut input = HcInput::new(src);
+    if wide {
+        let (a, nx, ny) = hdecode64(&mut input, smooth)?;
+        Ok((a, nx, ny))
+    } else {
+        let (a, nx, ny) = hdecode32(&mut input, smooth)?;
+        Ok((a.into_iter().map(|v| v as i64).collect(), nx, ny))
+    }
 }
 
 #[cfg(test)]
@@ -1144,6 +2131,33 @@ mod tests {
         for v in [-5i64, -1, 0, 1, 2, 100, -100, i32::MIN as i64, i32::MAX as i64] {
             assert_eq!(unzigzag(zigzag(v)), v);
         }
+    }
+
+    #[test]
+    fn plio_single_pixel_at_end_of_run() {
+        // PLIO line list for a 512-pixel row with one pixel == 1 at index 178
+        // (0-based), all else zero. Lifted verbatim from the cfitsio `fpack -p`
+        // output for row 137 of EUVEngc4151imgx.fits. Header word [2] = -100 (the
+        // PLIO magic, 0xFF9C) forces the long-form length decode.
+        let words: Vec<i16> = [0u16, 7, 0xFF9C, 9, 0, 0, 0, 20659, 333]
+            .iter()
+            .map(|&w| w as i16)
+            .collect();
+        let out = plio_decompress(&words, 512).unwrap();
+        let mut expected = vec![0i32; 512];
+        expected[178] = 1; // opcode 5 (run 179, last pixel set to pv=1)
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn plio_empty_list_is_all_zero() {
+        // A zero-length line list (lllen == 0) decodes to an all-zero tile.
+        let words: Vec<i16> = [0u16, 7, 0xFF9C, 0, 0, 0, 0]
+            .iter()
+            .map(|&w| w as i16)
+            .collect();
+        let out = plio_decompress(&words, 16).unwrap();
+        assert_eq!(out, vec![0i32; 16]);
     }
 
     #[test]

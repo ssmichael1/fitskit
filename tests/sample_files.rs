@@ -266,6 +266,24 @@ fn rice_roundtrip_fgs_i32() {
     assert_rice_roundtrip("FGSf64y0106m_a1f.fits", "FGSf64y0106m_a1f.rice.fits.fz");
 }
 
+#[test]
+fn plio_roundtrip_euv() {
+    // PLIO_1 (IRAF pixel-list RLE) over the I16 EUV image extensions. Lossless,
+    // so the decode must reproduce the source pixels byte-for-byte.
+    assert_rice_roundtrip("EUVEngc4151imgx.fits", "EUVEngc4151imgx.plio.fits.fz");
+}
+
+#[test]
+fn hcompress_int_roundtrip_euv() {
+    // HCOMPRESS_1 with SCALE=0 is LOSSLESS for integer images, so the decode of
+    // the I16 EUV extensions must be byte-exact vs the source. Exercises both the
+    // 512x16 and 2048x16 tile geometries.
+    assert_rice_roundtrip(
+        "EUVEngc4151imgx.fits",
+        "EUVEngc4151imgx.hcomp_int.fits.fz",
+    );
+}
+
 // --- float tile-compression: bit-exact vs funpack -------------------------
 //
 // Quantized-float decompression is *lossy*, so the reconstructed floats will not
@@ -430,6 +448,14 @@ fn float_cube_rice_dither1_matches_funpack() {
 fn float_cube_rice_nodither_matches_funpack() {
     // 200x200x4 F32 cube, RICE_1, NO_DITHER.
     assert_float_matches_funpack("WFPC2u5780205r_c0fx.rice_nodith.fits.fz");
+}
+
+#[test]
+fn float_hcompress_dither1_matches_funpack() {
+    // 1024x1024 F32, HCOMPRESS_1 (SCALE=0 on the quantized ints),
+    // ZQUANTIZ=SUBTRACTIVE_DITHER_1. Lossy (quantized), so validate bit-exact
+    // against funpack's own reconstruction. Tiles are 1024x16.
+    assert_float_matches_funpack("FOCx38i0101t_c0f.hcomp.fits.fz");
 }
 
 #[cfg(feature = "gzip")]

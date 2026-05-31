@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: samp
-          key: fits4-samples-v3
+          key: fits4-samples-v4
 
       - name: Download sample FITS files
         if: steps.cache-samples.outputs.cache-hit != 'true'
@@ -50,6 +50,9 @@ jobs:
             FGSf64y0106m_a1f.rice.fits.fz \
             EUVEngc4151imgx.gzip1.fits.fz \
             EUVEngc4151imgx.gzip2.fits.fz \
+            EUVEngc4151imgx.plio.fits.fz \
+            EUVEngc4151imgx.hcomp_int.fits.fz \
+            FOCx38i0101t_c0f.hcomp.fits.fz \
             FOCx38i0101t_c0f.rice_nodith.fits.fz \
             FOCx38i0101t_c0f.rice_dith.fits.fz \
             FOCx38i0101t_c0f.rice_dith2.fits.fz \
