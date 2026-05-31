@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-fits4 reads *and* writes the full FITS v4.0 standard — primary and extension HDUs, images, ASCII tables, and binary tables (including variable-length arrays) — with **no external dependencies** in the default build and **no C toolchain** required. It also decodes every tile-compressed image type in the standard (RICE, GZIP, PLIO, HCOMPRESS) on the read path.
+fits4 reads *and* writes the full FITS v4.0 standard — primary and extension HDUs, images, ASCII tables, and binary tables (including variable-length arrays) — with **no external dependencies** in the default build and **no C toolchain** required. It decodes every tile-compressed image type in the standard (RICE, GZIP, PLIO, HCOMPRESS) and — uniquely among pure-Rust FITS crates — **writes** RICE- and GZIP-compressed images that cfitsio's `funpack` reads back byte-for-byte.
 
 ## Features
 
@@ -15,6 +15,7 @@ fits4 reads *and* writes the full FITS v4.0 standard — primary and extension H
 - **Variable-length arrays** — `P` and `Q` heap descriptors in binary tables
 - **CHECKSUM/DATASUM** — ones-complement integrity computation and verification
 - **Tile-compressed images (read)** — RICE_1, GZIP_1, GZIP_2, PLIO_1, and HCOMPRESS_1, including float quantization with subtractive dithering; decoded bit-exactly against cfitsio's `funpack`
+- **Tile-compressed images (write)** — encode RICE_1 and GZIP_1/GZIP_2 (integer and float); output verified byte-exact through `funpack`
 - **Zero dependencies by default** — optional `image` and `gzip` features pull in pure-Rust crates only
 
 ## Installation
@@ -116,6 +117,26 @@ for hdu in fits.extensions() {
 # Ok::<(), fits4::Error>(())
 ```
 
+### Writing a tile-compressed image
+
+`ImageData::compress` produces a compressed-image `BINTABLE` HDU ready to push
+into a file. The output is read back byte-for-byte by cfitsio's `funpack`.
+
+```rust
+use fits4::{FitsFile, ImageData, PixelData, CompressOptions};
+
+let pixels: Vec<i16> = (0..10000).map(|i| (i % 1000) as i16).collect();
+let img = ImageData::new(vec![100, 100], PixelData::I16(pixels));
+
+// Default options: RICE_1, one tile per row, lossless for integers.
+let hdu = img.compress(&CompressOptions::default())?;
+
+let mut fits = FitsFile::with_empty_primary();
+fits.push_extension(hdu);
+fits.to_file("compressed.fits")?;
+# Ok::<(), fits4::Error>(())
+```
+
 ### Checksums
 
 ```rust
@@ -149,6 +170,7 @@ that structure directly:
 | `BinTable` / `BinColumn` / `BinColumnType` / `BinCellValue` | Binary-table model — columns, rows, and heap (variable-length arrays); built with `BinTableBuilder`. |
 | `AsciiTable` | ASCII `TABLE` model with `TFORMn` column parsing and `TSCALn`/`TZEROn` scaling. |
 | `CompressedImage` / `CompressionType` / `TileGeometry` / `Quantize` | Read-side view over a tile-compressed image: detect the algorithm and geometry, then `decompress()` to an `ImageData`. |
+| `CompressOptions` | Write-side encode options (algorithm, tiling, quantization, dithering) for `ImageData::compress` / `compress_image`. |
 | `Bitpix` | The `BITPIX` data type (`8`/`16`/`32`/`64`/`-32`/`-64`). |
 | `Error` / `Result` | Crate error type and result alias. |
 
@@ -160,22 +182,22 @@ are preserved for a lossless round-trip write.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| *(none)* | ✓ | Core read/write, all HDU types, RICE_1 / PLIO_1 / HCOMPRESS_1 tile decompression — zero dependencies |
+| *(none)* | ✓ | Core read/write, all HDU types, RICE_1 / PLIO_1 / HCOMPRESS_1 decompression, and RICE_1 compression — zero dependencies |
 | `image` | | Conversion between `ImageData` and the [`image`](https://crates.io/crates/image) crate's `DynamicImage` |
-| `gzip` | | Decoding of `GZIP_1`/`GZIP_2` tile-compressed images via the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide) crate |
+| `gzip` | | `GZIP_1`/`GZIP_2` tile compression and decompression via the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide) crate |
 
-The default build stays dependency-free; `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` decompression all work without any feature (only `GZIP_1`/`GZIP_2` need the `gzip` feature).
+The default build stays dependency-free; `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` decompression and `RICE_1` compression all work without any feature (only `GZIP_1`/`GZIP_2` need the `gzip` feature).
 
 ## Why fits4?
 
-Among Rust FITS crates, fits4 fills a specific niche — **pure Rust, zero default dependencies, full read + write including tables, and complete compressed-image read support**, with no C toolchain to install.
+Among Rust FITS crates, fits4 fills a specific niche — **pure Rust, zero default dependencies, full read + write including tables, complete compressed-image reading, and compressed-image writing**, with no C toolchain to install. No other pure-Rust crate writes compressed FITS.
 
-| Crate | Pure Rust | Write | Tables | Compressed read | Notes |
-|-------|-----------|-------|--------|-----------------|-------|
-| [`fitsio`](https://crates.io/crates/fitsio) | ✗ | ✓ | ✓ | ✓ | Wraps the cfitsio C library; needs a C toolchain |
-| [`fitsrs`](https://crates.io/crates/fitsrs) | ✓ | ✗ | partial | — | Read-only |
-| [`fitrs`](https://crates.io/crates/fitrs) | ✓ | ✓ | ✗ | ✗ | Dormant; no table support |
-| **fits4** | ✓ | ✓ | ✓ | ✓ (all types) | Zero default deps; no C dependency |
+| Crate | Pure Rust | Write | Tables | Compressed read | Compressed write | Notes |
+|-------|-----------|-------|--------|-----------------|------------------|-------|
+| [`fitsio`](https://crates.io/crates/fitsio) | ✗ | ✓ | ✓ | ✓ | ✓ | Wraps the cfitsio C library; needs a C toolchain |
+| [`fitsrs`](https://crates.io/crates/fitsrs) | ✓ | ✗ | partial | — | ✗ | Read-only |
+| [`fitrs`](https://crates.io/crates/fitrs) | ✓ | ✓ | ✗ | ✗ | ✗ | Dormant; no table support |
+| **fits4** | ✓ | ✓ | ✓ | ✓ (all types) | ✓ (RICE/GZIP) | Zero default deps; no C dependency |
 
 ## Supported / not supported
 
@@ -189,10 +211,13 @@ Among Rust FITS crates, fits4 fills a specific niche — **pure Rust, zero defau
   HCOMPRESS_1 — for integer and floating-point images, including quantization
   with subtractive dithering (`NO_DITHER` / `SUBTRACTIVE_DITHER_1` /
   `SUBTRACTIVE_DITHER_2`)
+- Tile-compressed image **writing**: RICE_1 and GZIP_1/GZIP_2 — integer
+  (lossless) and float (lossless via GZIP, or lossy quantized + dithered);
+  output verified byte-exact through cfitsio's `funpack`
 
 **Not supported**
 
-- Writing/encoding tile-compressed images (read/decode only)
+- Encoding `PLIO_1` or `HCOMPRESS_1` (these decode only)
 - HCOMPRESS image smoothing (`SMOOTH` ≠ 0) on decode
 - Random groups (deprecated in FITS v4.0)
 
