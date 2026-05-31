@@ -133,6 +133,29 @@ fits2.primary().verify_datasum()?;
 # Ok::<(), fits4::Error>(())
 ```
 
+## Core types
+
+A FITS file is an ordered sequence of **Header-Data Units (HDUs)**. fits4 mirrors
+that structure directly:
+
+| Type | Role |
+|------|------|
+| `FitsFile` | Top-level container — an ordered `Vec<Hdu>`. Reads/writes files, byte slices, or any `Read`/`Write`; builder methods (`with_primary_image`, `with_empty_primary`, `push_extension`, `to_file`, `to_bytes`, `to_bytes_with_checksum`). |
+| `Hdu` | One Header-Data Unit: a `Header` plus an `HduData` payload. `as_compressed_image()` exposes a tile-compressed image stored in a `BINTABLE`. |
+| `HduData` | The payload enum: `Empty`, `Image(ImageData)`, `AsciiTable(AsciiTable)`, `BinTable(BinTable)`. |
+| `Header` | Ordered list of `Keyword`s with typed accessors (`get_int`, `get_float`, `get_string`, `get_bool`) and `set`. |
+| `Keyword` / `HeaderValue` | An 80-byte header card and its typed value (with `CONTINUE` long-string handling). |
+| `ImageData` / `PixelData` | Image `axes` plus a typed pixel buffer (`U8`/`I16`/`I32`/`I64`/`F32`/`F64`); raw access and BSCALE/BZERO-scaled access (`scaled_values`). |
+| `BinTable` / `BinColumn` / `BinColumnType` / `BinCellValue` | Binary-table model — columns, rows, and heap (variable-length arrays); built with `BinTableBuilder`. |
+| `AsciiTable` | ASCII `TABLE` model with `TFORMn` column parsing and `TSCALn`/`TZEROn` scaling. |
+| `CompressedImage` / `CompressionType` / `TileGeometry` / `Quantize` | Read-side view over a tile-compressed image: detect the algorithm and geometry, then `decompress()` to an `ImageData`. |
+| `Bitpix` | The `BITPIX` data type (`8`/`16`/`32`/`64`/`-32`/`-64`). |
+| `Error` / `Result` | Crate error type and result alias. |
+
+Decoding is done eagerly at read time (big-endian → native), except tile-compressed
+images, which are decoded lazily on `decompress()` so the original compressed tiles
+are preserved for a lossless round-trip write.
+
 ## Feature flags
 
 | Flag | Default | Description |
