@@ -10,10 +10,14 @@ readme = "README.md"
 keywords = ["fits", "astronomy", "fits-file", "compression", "image"]
 categories = ["science", "encoding", "parser-implementations"]
 authors = ["Steven Michael <ssmichael@gmail.com>"]
+exclude = ["CLAUDE.md", "COMPRESSION_PLAN.md", "scripts/", ".github/"]
 
 [dependencies.image]
 version = "0.25"
 optional = true
+# Only the in-memory DynamicImage/ImageBuffer types are used (no file codecs),
+# so disable default format features — this drops the AVIF chain (rav1e, core2).
+default-features = false
 
 [dependencies.miniz_oxide]
 version = "0.8"
@@ -25,3 +29,6 @@ gzip = ["dep:miniz_oxide"]
 
 [profile.test]
 opt-level = 3
+
+[package.metadata.docs.rs]
+all-features = true
