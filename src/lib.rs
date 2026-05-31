@@ -10,12 +10,18 @@
 //! - **ASCII TABLE extension** — Aw, Iw, Fw.d, Ew.d, Dw.d column formats
 //! - **BINTABLE extension** — all type codes including variable-length arrays (P/Q descriptors)
 //!
-//! Tile-compressed images (`ZIMAGE`) are supported for **reading** integer images
-//! (`RICE_1`; `GZIP_1`/`GZIP_2` behind the `gzip` feature) via
+//! Tile-compressed images (`ZIMAGE`) are supported for **reading** integer and float
+//! images (`RICE_1`, `PLIO_1`, `HCOMPRESS_1`; `GZIP_1`/`GZIP_2` behind the `gzip`
+//! feature), including float quantization with `SUBTRACTIVE_DITHER_1`/`_2`, via
 //! [`Hdu::as_compressed_image`](hdu::Hdu::as_compressed_image) +
 //! [`CompressedImage::decompress`](tile_compress::CompressedImage::decompress).
-//! Float quantization/dithering, `PLIO_1`, `HCOMPRESS_1`, and the write/compress
-//! path are not yet implemented. Random groups are not supported.
+//!
+//! **Writing** tile-compressed images is supported for `RICE_1` (integer + quantized
+//! float) and `GZIP_1`/`GZIP_2` (integer; lossless float via `GZIP_1`) via
+//! [`ImageData::compress`](image_data::ImageData::compress) /
+//! [`compress_image`](tile_compress::compress_image), producing standard, cfitsio-
+//! readable (`funpack`-decodable) compressed FITS. `PLIO_1`/`HCOMPRESS_1` encoding and
+//! random groups are not supported.
 //!
 //! ## Quick start — reading
 //!
@@ -124,5 +130,7 @@ pub use hdu::{Hdu, HduData};
 pub use header::Header;
 pub use image_data::{ImageData, PixelData};
 pub use keyword::{HeaderValue, Keyword};
-pub use tile_compress::{CompressedImage, CompressionType, Quantize, TileGeometry};
+pub use tile_compress::{
+    compress_image, CompressOptions, CompressedImage, CompressionType, Quantize, TileGeometry,
+};
 pub use types::Bitpix;
