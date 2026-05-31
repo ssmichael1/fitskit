@@ -26,7 +26,8 @@ Zero external dependencies for core functionality. Optional `image` crate behind
 | `ascii_table.rs` | `AsciiTable`: TFORMn parsing (Aw/Iw/Fw.d/Ew.d/Dw.d), column access, TSCALn/TZEROn |
 | `bintable.rs` | `BinTable`: all type codes (L,X,B,I,J,K,A,E,D,C,M,P,Q), heap/VLA |
 | `checksum.rs` | CHECKSUM/DATASUM ones-complement computation |
-| `hdu.rs` | `Hdu` struct, `HduData` enum (Empty/Image/AsciiTable/BinTable) |
+| `tile_compress.rs` | Tiled-image compression decode: RICE_1, GZIP_1/2 (feature `gzip`), PLIO_1, HCOMPRESS_1; quantization + subtractive dithering for floats |
+| `hdu.rs` | `Hdu` struct, `HduData` enum (Empty/Image/AsciiTable/BinTable); `as_compressed_image()` accessor |
 | `fits.rs` | `FitsFile`: top-level read/write, HDU iteration, builder API |
 | `image_conv.rs` | (feature="image") `DynamicImage` <-> `ImageData` conversion |
 
@@ -65,7 +66,9 @@ NASA sample FITS files in `samp/`:
 
 ## Design Decisions
 
-- **No external dependencies** for core — no `byteorder`, no `thiserror`
+- **No external dependencies** for core — no `byteorder`, no `thiserror`. Only optional, feature-gated deps: `image` and `gzip` (`miniz_oxide`)
 - **Random groups** skipped (deprecated per standard)
 - BSCALE/BZERO: raw vs scaled access modes on `ImageData`
 - Unsigned integer convention: BZERO offset (32768 for u16, etc.)
+- **Tile compression**: decode (read) only — RICE_1/PLIO_1/HCOMPRESS_1 in the zero-dep core, GZIP_1/2 behind the `gzip` feature. Lazy `hdu.as_compressed_image()?.decompress()?`; `HduData` stays `BinTable` so the compressed tiles survive for lossless round-trip. Float decode reproduces cfitsio's fused multiply-add to stay bit-exact vs `funpack` (see memory). Compression *encode* (write) and HCOMPRESS `SMOOTH≠0` are not implemented
+- **Compressed fixtures**: `scripts/gen_compressed_fixtures.sh` builds fpack `.fz` test files into `samp/` (gitignored, served from GCS bucket `fits4_samples`); compression tests skip when fixtures/`funpack` are absent
