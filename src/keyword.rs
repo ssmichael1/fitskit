@@ -204,7 +204,11 @@ impl Keyword {
 fn format_value(value: &HeaderValue) -> String {
     match value {
         HeaderValue::Logical(b) => {
-            if *b { "T".to_string() } else { "F".to_string() }
+            if *b {
+                "T".to_string()
+            } else {
+                "F".to_string()
+            }
         }
         HeaderValue::Integer(i) => format!("{i}"),
         HeaderValue::Float(f) => format_float(*f),
@@ -443,7 +447,9 @@ fn parse_complex_value(s: &str) -> Result<(HeaderValue, Option<String>)> {
     let inner = &s[1..close];
     let parts: Vec<&str> = inner.split(',').collect();
     if parts.len() != 2 {
-        return Err(Error::InvalidKeyword("complex value must have two components".into()));
+        return Err(Error::InvalidKeyword(
+            "complex value must have two components".into(),
+        ));
     }
 
     let rest = &s[close + 1..];
@@ -471,7 +477,11 @@ fn split_comment(s: &str) -> (&str, Option<String>) {
     if let Some(pos) = s.find('/') {
         let val = &s[..pos];
         let cmt = s[pos + 1..].trim();
-        let comment = if cmt.is_empty() { None } else { Some(cmt.to_string()) };
+        let comment = if cmt.is_empty() {
+            None
+        } else {
+            Some(cmt.to_string())
+        };
         (val, comment)
     } else {
         (s, None)
@@ -482,7 +492,11 @@ fn parse_trailing_comment(s: &str) -> Option<String> {
     let trimmed = s.trim_start();
     if let Some(rest) = trimmed.strip_prefix('/') {
         let cmt = rest.trim();
-        if cmt.is_empty() { None } else { Some(cmt.to_string()) }
+        if cmt.is_empty() {
+            None
+        } else {
+            Some(cmt.to_string())
+        }
     } else {
         None
     }

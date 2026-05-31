@@ -52,7 +52,9 @@ impl BinColumnType {
         }
 
         if code_pos >= bytes.len() {
-            return Err(Error::InvalidTableFormat(format!("no type code in TFORM: {s}")));
+            return Err(Error::InvalidTableFormat(format!(
+                "no type code in TFORM: {s}"
+            )));
         }
 
         let repeat: usize = if code_pos == 0 {
@@ -92,7 +94,10 @@ impl BinColumnType {
             b'D' => Ok(BinColumnType::D64(repeat)),
             b'C' => Ok(BinColumnType::C64(repeat)),
             b'M' => Ok(BinColumnType::M128(repeat)),
-            _ => Err(Error::InvalidTableFormat(format!("unknown BINTABLE type code: {}", code as char))),
+            _ => Err(Error::InvalidTableFormat(format!(
+                "unknown BINTABLE type code: {}",
+                code as char
+            ))),
         }
     }
 
@@ -210,7 +215,9 @@ impl BinTable {
 
             let tscal = header.get_float(&format!("TSCAL{i}")).unwrap_or(1.0);
             let tzero = header.get_float(&format!("TZERO{i}")).unwrap_or(0.0);
-            let tunit = header.get_string(&format!("TUNIT{i}")).map(|s| s.to_string());
+            let tunit = header
+                .get_string(&format!("TUNIT{i}"))
+                .map(|s| s.to_string());
 
             columns.push(BinColumn {
                 name,
@@ -266,12 +273,8 @@ impl BinTable {
                 let vals: Vec<bool> = bytes[..*n].iter().map(|&b| b == b'T').collect();
                 Ok(BinCellValue::Logical(vals))
             }
-            BinColumnType::Bit(n) => {
-                Ok(BinCellValue::Bits(bytes.to_vec(), *n))
-            }
-            BinColumnType::Byte(n) => {
-                Ok(BinCellValue::Bytes(bytes[..*n].to_vec()))
-            }
+            BinColumnType::Bit(n) => Ok(BinCellValue::Bits(bytes.to_vec(), *n)),
+            BinColumnType::Byte(n) => Ok(BinCellValue::Bytes(bytes[..*n].to_vec())),
             BinColumnType::I16(n) => {
                 let vals: Vec<i16> = bytes
                     .chunks_exact(2)
@@ -359,7 +362,12 @@ impl BinTable {
     }
 
     /// Read variable-length array data from the heap.
-    fn read_heap_array(&self, elem_type: char, count: usize, offset: usize) -> Result<BinCellValue> {
+    fn read_heap_array(
+        &self,
+        elem_type: char,
+        count: usize,
+        offset: usize,
+    ) -> Result<BinCellValue> {
         if count == 0 {
             return match elem_type {
                 'B' => Ok(BinCellValue::Bytes(Vec::new())),
@@ -370,7 +378,9 @@ impl BinTable {
                 'D' => Ok(BinCellValue::F64(Vec::new())),
                 'A' => Ok(BinCellValue::String(String::new())),
                 'L' => Ok(BinCellValue::Logical(Vec::new())),
-                _ => Err(Error::InvalidTableFormat(format!("unsupported VLA element type: {elem_type}"))),
+                _ => Err(Error::InvalidTableFormat(format!(
+                    "unsupported VLA element type: {elem_type}"
+                ))),
             };
         }
 
@@ -381,7 +391,11 @@ impl BinTable {
             'K' | 'D' => 8,
             'C' => 8,
             'M' => 16,
-            _ => return Err(Error::InvalidTableFormat(format!("unsupported VLA element type: {elem_type}"))),
+            _ => {
+                return Err(Error::InvalidTableFormat(format!(
+                    "unsupported VLA element type: {elem_type}"
+                )))
+            }
         };
 
         let end = offset + count * elem_size;
@@ -395,7 +409,9 @@ impl BinTable {
         let data = &self.heap[offset..end];
 
         match elem_type {
-            'L' => Ok(BinCellValue::Logical(data.iter().map(|&b| b == b'T').collect())),
+            'L' => Ok(BinCellValue::Logical(
+                data.iter().map(|&b| b == b'T').collect(),
+            )),
             'B' => Ok(BinCellValue::Bytes(data.to_vec())),
             'A' => {
                 let s = std::str::from_utf8(data)
@@ -429,20 +445,30 @@ impl BinTable {
                     .map(|c| f64::from_be_bytes(c.try_into().unwrap()))
                     .collect(),
             )),
-            _ => Err(Error::InvalidTableFormat(format!("unsupported VLA type: {elem_type}"))),
+            _ => Err(Error::InvalidTableFormat(format!(
+                "unsupported VLA type: {elem_type}"
+            ))),
         }
     }
 
     /// Populate header keywords for this binary table.
     pub fn fill_header(&self, header: &mut Header) {
-        header.set("XTENSION", HeaderValue::String("BINTABLE".into()), Some("binary table extension"));
+        header.set(
+            "XTENSION",
+            HeaderValue::String("BINTABLE".into()),
+            Some("binary table extension"),
+        );
         header.set("BITPIX", HeaderValue::Integer(8), None);
         header.set("NAXIS", HeaderValue::Integer(2), None);
         header.set("NAXIS1", HeaderValue::Integer(self.row_len as i64), None);
         header.set("NAXIS2", HeaderValue::Integer(self.nrows as i64), None);
         header.set("PCOUNT", HeaderValue::Integer(self.heap.len() as i64), None);
         header.set("GCOUNT", HeaderValue::Integer(1), None);
-        header.set("TFIELDS", HeaderValue::Integer(self.columns.len() as i64), None);
+        header.set(
+            "TFIELDS",
+            HeaderValue::Integer(self.columns.len() as i64),
+            None,
+        );
 
         for (i, col) in self.columns.iter().enumerate() {
             let idx = i + 1;
@@ -458,18 +484,10 @@ impl BinTable {
             );
 
             if col.tscal != 1.0 {
-                header.set(
-                    &format!("TSCAL{idx}"),
-                    HeaderValue::Float(col.tscal),
-                    None,
-                );
+                header.set(&format!("TSCAL{idx}"), HeaderValue::Float(col.tscal), None);
             }
             if col.tzero != 0.0 {
-                header.set(
-                    &format!("TZERO{idx}"),
-                    HeaderValue::Float(col.tzero),
-                    None,
-                );
+                header.set(&format!("TZERO{idx}"), HeaderValue::Float(col.tzero), None);
             }
             if let Some(ref unit) = col.tunit {
                 header.set(
@@ -492,7 +510,7 @@ impl BinTable {
 /// Builder for constructing a `BinTable` row by row.
 ///
 /// ```
-/// use fits4::{BinTableBuilder, BinColumnType};
+/// use fitskit::{BinTableBuilder, BinColumnType};
 ///
 /// let table = BinTableBuilder::new()
 ///     .add_column("RA", BinColumnType::D64(1))
@@ -663,12 +681,30 @@ mod tests {
 
     #[test]
     fn parse_tform_codes() {
-        assert!(matches!(BinColumnType::parse("1J").unwrap(), BinColumnType::J32(1)));
-        assert!(matches!(BinColumnType::parse("10E").unwrap(), BinColumnType::E32(10)));
-        assert!(matches!(BinColumnType::parse("8A").unwrap(), BinColumnType::Char(8)));
-        assert!(matches!(BinColumnType::parse("D").unwrap(), BinColumnType::D64(1)));
-        assert!(matches!(BinColumnType::parse("1PJ").unwrap(), BinColumnType::VarP('J')));
-        assert!(matches!(BinColumnType::parse("1QD").unwrap(), BinColumnType::VarQ('D')));
+        assert!(matches!(
+            BinColumnType::parse("1J").unwrap(),
+            BinColumnType::J32(1)
+        ));
+        assert!(matches!(
+            BinColumnType::parse("10E").unwrap(),
+            BinColumnType::E32(10)
+        ));
+        assert!(matches!(
+            BinColumnType::parse("8A").unwrap(),
+            BinColumnType::Char(8)
+        ));
+        assert!(matches!(
+            BinColumnType::parse("D").unwrap(),
+            BinColumnType::D64(1)
+        ));
+        assert!(matches!(
+            BinColumnType::parse("1PJ").unwrap(),
+            BinColumnType::VarP('J')
+        ));
+        assert!(matches!(
+            BinColumnType::parse("1QD").unwrap(),
+            BinColumnType::VarQ('D')
+        ));
     }
 
     #[test]
@@ -684,7 +720,9 @@ mod tests {
 
     #[test]
     fn tform_round_trip() {
-        for s in &["1J", "10E", "8A", "1D", "3I", "1L", "20X", "1C", "1M", "1PJ", "1QD"] {
+        for s in &[
+            "1J", "10E", "8A", "1D", "3I", "1L", "20X", "1C", "1M", "1PJ", "1QD",
+        ] {
             let ct = BinColumnType::parse(s).unwrap();
             let out = ct.to_tform_string();
             let ct2 = BinColumnType::parse(&out).unwrap();

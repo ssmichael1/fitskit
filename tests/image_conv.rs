@@ -1,6 +1,6 @@
 #![cfg(feature = "image")]
 
-use fits4::*;
+use fitskit::*;
 use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
 type Gray16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
@@ -64,10 +64,7 @@ fn u16_full_range() {
 
 #[test]
 fn f32_normalizes_to_u16() {
-    let img_data = ImageData::new(
-        vec![4],
-        PixelData::F32(vec![0.0, 1.0, 0.5, 0.25]),
-    );
+    let img_data = ImageData::new(vec![4], PixelData::F32(vec![0.0, 1.0, 0.5, 0.25]));
 
     let back = img_data.to_dynamic_image(1.0, 0.0).unwrap();
     match back {

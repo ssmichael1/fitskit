@@ -32,7 +32,11 @@ impl Hdu {
     /// Create a primary HDU with image data.
     pub fn primary_image(image: ImageData) -> Self {
         let mut header = Header::new();
-        header.set("SIMPLE", HeaderValue::Logical(true), Some("conforms to FITS standard"));
+        header.set(
+            "SIMPLE",
+            HeaderValue::Logical(true),
+            Some("conforms to FITS standard"),
+        );
         image.fill_header(&mut header);
         Hdu {
             header,
@@ -43,7 +47,11 @@ impl Hdu {
     /// Create a primary HDU with no data.
     pub fn primary_empty() -> Self {
         let mut header = Header::new();
-        header.set("SIMPLE", HeaderValue::Logical(true), Some("conforms to FITS standard"));
+        header.set(
+            "SIMPLE",
+            HeaderValue::Logical(true),
+            Some("conforms to FITS standard"),
+        );
         header.set("BITPIX", HeaderValue::Integer(8), None);
         header.set("NAXIS", HeaderValue::Integer(0), None);
         Hdu {
@@ -55,7 +63,11 @@ impl Hdu {
     /// Create an IMAGE extension HDU.
     pub fn image_extension(image: ImageData) -> Self {
         let mut header = Header::new();
-        header.set("XTENSION", HeaderValue::String("IMAGE".into()), Some("image extension"));
+        header.set(
+            "XTENSION",
+            HeaderValue::String("IMAGE".into()),
+            Some("image extension"),
+        );
         image.fill_header(&mut header);
         header.set("PCOUNT", HeaderValue::Integer(0), None);
         header.set("GCOUNT", HeaderValue::Integer(1), None);
@@ -82,6 +94,39 @@ impl Hdu {
         Hdu {
             header,
             data: HduData::BinTable(table),
+        }
+    }
+
+    /// View this HDU as a tile-compressed image, if it is one.
+    ///
+    /// A tile-compressed image is stored on disk as a `BINTABLE` extension with
+    /// `ZIMAGE = T` (the FITS Tiled Image Compression convention). This is a *cheap*
+    /// detection step: it inspects the header and, when it matches, returns a
+    /// [`CompressedImage`] view that borrows the underlying [`BinTable`] — preserving
+    /// the original compressed tiles for lossless round-trip writing.
+    ///
+    /// Returns `None` when the HDU is not a compressed-image BINTABLE. The actual
+    /// decoding happens in [`CompressedImage::decompress`]:
+    ///
+    /// ```no_run
+    /// # use fitskit::FitsFile;
+    /// # let fits = FitsFile::from_file("compressed.fits").unwrap();
+    /// for hdu in fits.extensions() {
+    ///     if let Some(cimg) = hdu.as_compressed_image() {
+    ///         let image = cimg.decompress().unwrap();
+    ///         println!("{:?}", image.axes);
+    ///     }
+    /// }
+    /// ```
+    pub fn as_compressed_image(&self) -> Option<crate::tile_compress::CompressedImage<'_>> {
+        if !crate::tile_compress::CompressedImage::detect(&self.header) {
+            return None;
+        }
+        match &self.data {
+            HduData::BinTable(table) => {
+                crate::tile_compress::CompressedImage::from_bintable(&self.header, table).ok()
+            }
+            _ => None,
         }
     }
 

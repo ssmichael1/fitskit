@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::header::{Header};
+use crate::header::Header;
 use crate::keyword::HeaderValue;
 use crate::types::Bitpix;
 
@@ -151,6 +151,31 @@ impl ImageData {
         let pixels = PixelData::from_bytes(bitpix, data)?;
 
         Ok(ImageData { axes, pixels })
+    }
+
+    /// Compress this image into a tile-compressed BINTABLE [`Hdu`](crate::hdu::Hdu)
+    /// (`ZIMAGE = T`), ready for [`FitsFile::push_extension`](crate::fits::FitsFile::push_extension).
+    ///
+    /// Thin wrapper over [`compress_image`](crate::tile_compress::compress_image). See
+    /// [`CompressOptions`](crate::tile_compress::CompressOptions) for the algorithm,
+    /// tiling, and float-quantization knobs. The round-trip inverse is
+    /// [`Hdu::as_compressed_image`](crate::hdu::Hdu::as_compressed_image) +
+    /// [`CompressedImage::decompress`](crate::tile_compress::CompressedImage::decompress).
+    ///
+    /// ```
+    /// use fitskit::{ImageData, PixelData};
+    /// use fitskit::tile_compress::CompressOptions;
+    ///
+    /// let img = ImageData::new(vec![8, 4], PixelData::I16((0..32).collect()));
+    /// let hdu = img.compress(&CompressOptions::default()).unwrap();
+    /// let back = hdu.as_compressed_image().unwrap().decompress().unwrap();
+    /// assert_eq!(back.pixels.to_bytes(), img.pixels.to_bytes());
+    /// ```
+    pub fn compress(
+        &self,
+        opts: &crate::tile_compress::CompressOptions,
+    ) -> Result<crate::hdu::Hdu> {
+        crate::tile_compress::compress_image(self, opts)
     }
 
     /// Populate header keywords for this image data.

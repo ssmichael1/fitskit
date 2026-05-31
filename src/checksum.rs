@@ -149,7 +149,11 @@ pub fn decode_checksum(ascii: &str, complement: bool) -> u32 {
     }
 
     let sum = (hi << 16) | lo;
-    if complement { !sum } else { sum }
+    if complement {
+        !sum
+    } else {
+        sum
+    }
 }
 
 /// Compute DATASUM for a data byte buffer (should be block-padded).

@@ -62,7 +62,14 @@ mod tests {
 
     #[test]
     fn bitpix_round_trip() {
-        for bp in [Bitpix::U8, Bitpix::I16, Bitpix::I32, Bitpix::I64, Bitpix::F32, Bitpix::F64] {
+        for bp in [
+            Bitpix::U8,
+            Bitpix::I16,
+            Bitpix::I32,
+            Bitpix::I64,
+            Bitpix::F32,
+            Bitpix::F64,
+        ] {
             assert_eq!(Bitpix::from_i64(bp.to_i64()).unwrap(), bp);
         }
     }

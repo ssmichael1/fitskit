@@ -1,4 +1,4 @@
-use fits4::*;
+use fitskit::*;
 
 #[test]
 fn round_trip_empty_primary() {
@@ -228,7 +228,7 @@ fn round_trip_bscale_bzero() {
 
 #[test]
 fn round_trip_bintable() {
-    use fits4::bintable::{BinColumn, BinColumnType, BinCellValue};
+    use fitskit::bintable::{BinCellValue, BinColumn, BinColumnType};
 
     // Build a simple bintable with 2 rows, 3 columns: i32, f64, 8-char string
     let col_j = BinColumn {
@@ -325,7 +325,7 @@ fn round_trip_bintable() {
 
 #[test]
 fn round_trip_bintable_vla() {
-    use fits4::bintable::{BinColumn, BinColumnType, BinCellValue};
+    use fitskit::bintable::{BinCellValue, BinColumn, BinColumnType};
 
     // Variable-length array column using P descriptor
     let col = BinColumn {
@@ -389,7 +389,7 @@ fn round_trip_bintable_vla() {
 
 #[test]
 fn round_trip_ascii_table() {
-    use fits4::ascii_table::{AsciiColumn, AsciiFormat, AsciiTable};
+    use fitskit::ascii_table::{AsciiColumn, AsciiFormat, AsciiTable};
 
     // 2 rows, 2 columns: name (A10) and value (F10.3)
     let col_name = AsciiColumn {
@@ -454,13 +454,17 @@ fn multiple_extensions() {
     // Add image extension
     let img = ImageData::new(vec![2], PixelData::F32(vec![1.0, 2.0]));
     let mut img_hdu = Hdu::image_extension(img);
-    img_hdu.header.set("EXTNAME", HeaderValue::String("MYIMAGE".into()), None);
+    img_hdu
+        .header
+        .set("EXTNAME", HeaderValue::String("MYIMAGE".into()), None);
     fits.push_extension(img_hdu);
 
     // Add another image extension
     let img2 = ImageData::new(vec![3], PixelData::U8(vec![10, 20, 30]));
     let mut img_hdu2 = Hdu::image_extension(img2);
-    img_hdu2.header.set("EXTNAME", HeaderValue::String("OTHER".into()), None);
+    img_hdu2
+        .header
+        .set("EXTNAME", HeaderValue::String("OTHER".into()), None);
     fits.push_extension(img_hdu2);
 
     let bytes = fits.to_bytes().unwrap();
@@ -488,21 +492,33 @@ fn block_alignment() {
 #[test]
 fn header_keyword_preservation() {
     let mut fits = FitsFile::with_empty_primary();
-    fits.primary_mut().header.push(Keyword::commentary("COMMENT", "Test comment line"));
-    fits.primary_mut().header.push(Keyword::commentary("HISTORY", "Created by fits4 tests"));
-    fits.primary_mut().header.set("AUTHOR", HeaderValue::String("test".into()), None);
+    fits.primary_mut()
+        .header
+        .push(Keyword::commentary("COMMENT", "Test comment line"));
+    fits.primary_mut()
+        .header
+        .push(Keyword::commentary("HISTORY", "Created by fitskit tests"));
+    fits.primary_mut()
+        .header
+        .set("AUTHOR", HeaderValue::String("test".into()), None);
 
     let bytes = fits.to_bytes().unwrap();
     let fits2 = FitsFile::from_bytes(&bytes).unwrap();
 
     assert_eq!(fits2.primary().header.get_string("AUTHOR"), Some("test"));
 
-    let comments: Vec<_> = fits2.primary().header.iter()
+    let comments: Vec<_> = fits2
+        .primary()
+        .header
+        .iter()
         .filter(|k| k.name == "COMMENT")
         .collect();
     assert_eq!(comments.len(), 1);
 
-    let history: Vec<_> = fits2.primary().header.iter()
+    let history: Vec<_> = fits2
+        .primary()
+        .header
+        .iter()
         .filter(|k| k.name == "HISTORY")
         .collect();
     assert_eq!(history.len(), 1);

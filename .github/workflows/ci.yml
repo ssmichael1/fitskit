@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: samp
-          key: fits4-samples-v1
+          key: fits4-samples-v4
 
       - name: Download sample FITS files
         if: steps.cache-samples.outputs.cache-hit != 'true'
@@ -41,15 +41,42 @@ jobs:
             WFPC2u5780205r_c0fx.fits; do
             curl -sSfL "$BASE/$f" -o "samp/$f"
           done
+          # Compressed (fpack) fixtures: best-effort — these may not yet be
+          # uploaded to the bucket, so a 404 must not fail CI. The tile-compression
+          # tests skip cleanly when a fixture is absent.
+          for f in \
+            EUVEngc4151imgx.rice.fits.fz \
+            EUVEngc4151imgx.rice_t100.fits.fz \
+            FGSf64y0106m_a1f.rice.fits.fz \
+            EUVEngc4151imgx.gzip1.fits.fz \
+            EUVEngc4151imgx.gzip2.fits.fz \
+            EUVEngc4151imgx.plio.fits.fz \
+            EUVEngc4151imgx.hcomp_int.fits.fz \
+            FOCx38i0101t_c0f.hcomp.fits.fz \
+            FOCx38i0101t_c0f.rice_nodith.fits.fz \
+            FOCx38i0101t_c0f.rice_dith.fits.fz \
+            FOCx38i0101t_c0f.rice_dith2.fits.fz \
+            FOCx38i0101t_c0f.gzip_lossless.fits.fz \
+            WFPC2u5780205r_c0fx.rice_dith.fits.fz \
+            WFPC2u5780205r_c0fx.rice_nodith.fits.fz; do
+            curl -sSfL "$BASE/$f" -o "samp/$f" || true
+          done
+
+      # The float tile-compression tests validate against the `funpack` CLI
+      # (cfitsio). It is not installed here, so those tests skip cleanly; the
+      # integer-codec round-trip tests still run against the downloaded fixtures.
 
       - name: Clippy
-        run: cargo clippy --all-targets --features image -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
         run: cargo test
 
       - name: Test (with image feature)
         run: cargo test --features image
+
+      - name: Test (all features)
+        run: cargo test --all-features
 
       - name: Doc
         run: cargo doc --no-deps --features image

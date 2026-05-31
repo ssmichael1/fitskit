@@ -49,7 +49,9 @@ impl AsciiFormat {
                     _ => unreachable!(),
                 }
             }
-            _ => Err(Error::InvalidTableFormat(format!("unknown ASCII TFORM code: {s}"))),
+            _ => Err(Error::InvalidTableFormat(format!(
+                "unknown ASCII TFORM code: {s}"
+            ))),
         }
     }
 
@@ -120,7 +122,9 @@ impl AsciiTable {
 
             let tscal = header.get_float(&format!("TSCAL{i}")).unwrap_or(1.0);
             let tzero = header.get_float(&format!("TZERO{i}")).unwrap_or(0.0);
-            let tunit = header.get_string(&format!("TUNIT{i}")).map(|s| s.to_string());
+            let tunit = header
+                .get_string(&format!("TUNIT{i}"))
+                .map(|s| s.to_string());
 
             columns.push(AsciiColumn {
                 name,
@@ -191,14 +195,22 @@ impl AsciiTable {
 
     /// Populate header keywords for this table.
     pub fn fill_header(&self, header: &mut Header) {
-        header.set("XTENSION", HeaderValue::String("TABLE".into()), Some("ASCII table extension"));
+        header.set(
+            "XTENSION",
+            HeaderValue::String("TABLE".into()),
+            Some("ASCII table extension"),
+        );
         header.set("BITPIX", HeaderValue::Integer(8), None);
         header.set("NAXIS", HeaderValue::Integer(2), None);
         header.set("NAXIS1", HeaderValue::Integer(self.row_len as i64), None);
         header.set("NAXIS2", HeaderValue::Integer(self.nrows as i64), None);
         header.set("PCOUNT", HeaderValue::Integer(0), None);
         header.set("GCOUNT", HeaderValue::Integer(1), None);
-        header.set("TFIELDS", HeaderValue::Integer(self.columns.len() as i64), None);
+        header.set(
+            "TFIELDS",
+            HeaderValue::Integer(self.columns.len() as i64),
+            None,
+        );
 
         for (i, col) in self.columns.iter().enumerate() {
             let idx = i + 1;
@@ -220,25 +232,13 @@ impl AsciiTable {
                 AsciiFormat::Ewd(w, d) => format!("E{w}.{d}"),
                 AsciiFormat::Dwd(w, d) => format!("D{w}.{d}"),
             };
-            header.set(
-                &format!("TFORM{idx}"),
-                HeaderValue::String(fmt_str),
-                None,
-            );
+            header.set(&format!("TFORM{idx}"), HeaderValue::String(fmt_str), None);
 
             if col.tscal != 1.0 {
-                header.set(
-                    &format!("TSCAL{idx}"),
-                    HeaderValue::Float(col.tscal),
-                    None,
-                );
+                header.set(&format!("TSCAL{idx}"), HeaderValue::Float(col.tscal), None);
             }
             if col.tzero != 0.0 {
-                header.set(
-                    &format!("TZERO{idx}"),
-                    HeaderValue::Float(col.tzero),
-                    None,
-                );
+                header.set(&format!("TZERO{idx}"), HeaderValue::Float(col.tzero), None);
             }
             if let Some(ref unit) = col.tunit {
                 header.set(
