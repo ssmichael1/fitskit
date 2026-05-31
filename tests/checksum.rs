@@ -1,5 +1,5 @@
-use fits4::*;
 use fits4::checksum;
+use fits4::*;
 
 #[test]
 fn write_with_checksum_and_verify() {

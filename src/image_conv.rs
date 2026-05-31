@@ -44,10 +44,14 @@ impl ImageData {
             _ => {
                 // Normalize to u16 range
                 let scaled = self.scaled_values(bscale, bzero);
-                let (min, max) = scaled.iter().fold((f64::MAX, f64::MIN), |(mn, mx), &v| {
-                    (mn.min(v), mx.max(v))
-                });
-                let range = if (max - min).abs() < 1e-30 { 1.0 } else { max - min };
+                let (min, max) = scaled
+                    .iter()
+                    .fold((f64::MAX, f64::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+                let range = if (max - min).abs() < 1e-30 {
+                    1.0
+                } else {
+                    max - min
+                };
 
                 let pixels: Vec<u16> = scaled
                     .iter()

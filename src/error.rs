@@ -14,6 +14,8 @@ pub enum Error {
     ChecksumMismatch { expected: u32, actual: u32 },
     UnsupportedExtension(String),
     InvalidTableFormat(String),
+    UnsupportedCompression(String),
+    CompressionError(String),
 }
 
 impl fmt::Display for Error {
@@ -29,10 +31,15 @@ impl fmt::Display for Error {
                 write!(f, "data size mismatch: expected {expected}, got {actual}")
             }
             Error::ChecksumMismatch { expected, actual } => {
-                write!(f, "checksum mismatch: expected {expected:#010x}, got {actual:#010x}")
+                write!(
+                    f,
+                    "checksum mismatch: expected {expected:#010x}, got {actual:#010x}"
+                )
             }
             Error::UnsupportedExtension(s) => write!(f, "unsupported extension: {s}"),
             Error::InvalidTableFormat(s) => write!(f, "invalid table format: {s}"),
+            Error::UnsupportedCompression(s) => write!(f, "unsupported compression: {s}"),
+            Error::CompressionError(s) => write!(f, "compression error: {s}"),
         }
     }
 }

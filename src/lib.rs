@@ -10,7 +10,12 @@
 //! - **ASCII TABLE extension** — Aw, Iw, Fw.d, Ew.d, Dw.d column formats
 //! - **BINTABLE extension** — all type codes including variable-length arrays (P/Q descriptors)
 //!
-//! Tile-compressed images (`ZIMAGE`) and random groups are not supported.
+//! Tile-compressed images (`ZIMAGE`) are supported for **reading** integer images
+//! (`RICE_1`; `GZIP_1`/`GZIP_2` behind the `gzip` feature) via
+//! [`Hdu::as_compressed_image`](hdu::Hdu::as_compressed_image) +
+//! [`CompressedImage::decompress`](tile_compress::CompressedImage::decompress).
+//! Float quantization/dithering, `PLIO_1`, `HCOMPRESS_1`, and the write/compress
+//! path are not yet implemented. Random groups are not supported.
 //!
 //! ## Quick start — reading
 //!
@@ -91,28 +96,33 @@
 //!
 //! - **`image`** — enables conversion between [`ImageData`] and the
 //!   [`image`](https://crates.io/crates/image) crate's `DynamicImage`.
+//! - **`gzip`** — enables decoding of `GZIP_1`/`GZIP_2` tile-compressed images via
+//!   the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide) crate. The
+//!   default build stays dependency-free; `RICE_1` works without this feature.
 
-pub mod error;
-pub mod types;
-pub mod keyword;
-pub mod header;
-pub mod io_utils;
-pub mod image_data;
 pub mod ascii_table;
 pub mod bintable;
 pub mod checksum;
-pub mod hdu;
+pub mod error;
 pub mod fits;
+pub mod hdu;
+pub mod header;
+pub mod image_data;
+pub mod io_utils;
+pub mod keyword;
+pub mod tile_compress;
+pub mod types;
 
 #[cfg(feature = "image")]
 pub mod image_conv;
 
+pub use ascii_table::AsciiTable;
+pub use bintable::{BinCellValue, BinColumn, BinColumnType, BinTable, BinTableBuilder};
 pub use error::{Error, Result};
-pub use types::Bitpix;
-pub use keyword::{HeaderValue, Keyword};
+pub use fits::FitsFile;
+pub use hdu::{Hdu, HduData};
 pub use header::Header;
 pub use image_data::{ImageData, PixelData};
-pub use ascii_table::AsciiTable;
-pub use bintable::{BinTable, BinTableBuilder, BinColumn, BinColumnType, BinCellValue};
-pub use hdu::{Hdu, HduData};
-pub use fits::FitsFile;
+pub use keyword::{HeaderValue, Keyword};
+pub use tile_compress::{CompressedImage, CompressionType, Quantize, TileGeometry};
+pub use types::Bitpix;

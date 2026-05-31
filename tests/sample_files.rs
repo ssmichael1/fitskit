@@ -30,7 +30,11 @@ fn read_euv_image() {
     assert_eq!(primary.header.get_int("NAXIS"), Some(0));
     assert!(matches!(primary.data, HduData::Empty));
 
-    assert!(fits.len() > 1, "expected extensions, got {} HDUs", fits.len());
+    assert!(
+        fits.len() > 1,
+        "expected extensions, got {} HDUs",
+        fits.len()
+    );
 
     let mut image_count = 0;
     let mut bintable_count = 0;
@@ -187,4 +191,107 @@ fn all_sample_files_readable() {
             "{name}: missing SIMPLE=T"
         );
     }
+}
+
+// --- Tiled-image compression: RICE_1 / GZIP_1 round-trip vs originals --------
+//
+// Each compressed `.fz` fixture has the SAME HDU ordering as its uncompressed
+// source: every `HduData::Image` HDU in the source appears, in order, as a
+// compressed-image `HduData::BinTable` (ZIMAGE=T) in the `.fz`. We decompress
+// each and assert byte-exact equality of the pixel buffers.
+//
+// These are guarded per-fixture with `Path::exists()` so they skip cleanly on a
+// machine without the (gitignored, GCS-hosted) fixtures.
+
+/// Assert that decompressing every compressed-image HDU in `fz_name` reproduces,
+/// byte-for-byte, the corresponding `HduData::Image` HDUs of `src_name`.
+fn assert_rice_roundtrip(src_name: &str, fz_name: &str) {
+    let fz_path = samp(fz_name);
+    if !fz_path.exists() {
+        eprintln!("skipping: fixture {fz_name} not present");
+        return;
+    }
+    let src = FitsFile::from_file(samp(src_name)).expect("read source");
+    let fz = FitsFile::from_file(&fz_path).expect("read .fz");
+
+    // Source image HDUs, in order.
+    let src_images: Vec<&ImageData> = src
+        .hdus
+        .iter()
+        .filter_map(|h| match &h.data {
+            HduData::Image(im) if !im.pixels.to_bytes().is_empty() => Some(im),
+            _ => None,
+        })
+        .collect();
+
+    // Compressed-image HDUs in the .fz, in order.
+    let mut matched = 0usize;
+    let mut src_iter = src_images.iter();
+    for hdu in &fz.hdus {
+        if let Some(cimg) = hdu.as_compressed_image() {
+            let orig = src_iter
+                .next()
+                .expect("more compressed images than source images");
+            let dec = cimg.decompress().expect("decompress");
+            assert_eq!(
+                dec.axes, orig.axes,
+                "{fz_name}: axes mismatch on compressed HDU #{matched}"
+            );
+            assert_eq!(
+                dec.pixels.to_bytes(),
+                orig.pixels.to_bytes(),
+                "{fz_name}: pixel bytes differ on compressed HDU #{matched}"
+            );
+            matched += 1;
+        }
+    }
+    assert!(matched > 0, "{fz_name}: found no compressed-image HDUs");
+}
+
+#[test]
+fn rice_roundtrip_euv_row_tiled() {
+    // 512x512 I16, RICE row tiling (512x1 = one tile per row).
+    assert_rice_roundtrip("EUVEngc4151imgx.fits", "EUVEngc4151imgx.rice.fits.fz");
+}
+
+#[test]
+fn rice_roundtrip_euv_square_tiled() {
+    // Same source, forced 100x100 tiles: exercises 2-D edge-truncated tiling.
+    assert_rice_roundtrip("EUVEngc4151imgx.fits", "EUVEngc4151imgx.rice_t100.fits.fz");
+}
+
+#[test]
+fn rice_roundtrip_fgs_i32() {
+    // 89688x7 I32 image.
+    assert_rice_roundtrip("FGSf64y0106m_a1f.fits", "FGSf64y0106m_a1f.rice.fits.fz");
+}
+
+/// Float (`ZBITPIX < 0`) RICE fixtures are out of scope: decoding must return the
+/// documented `Err(UnsupportedCompression)` rather than wrong pixels.
+#[test]
+fn rice_float_fixture_is_unsupported() {
+    let fz_path = samp("FOCx38i0101t_c0f.rice_nodith.fits.fz");
+    if !fz_path.exists() {
+        eprintln!("skipping: fixture not present");
+        return;
+    }
+    let fz = FitsFile::from_file(&fz_path).expect("read .fz");
+    let mut checked = false;
+    for hdu in &fz.hdus {
+        if let Some(cimg) = hdu.as_compressed_image() {
+            assert!(
+                matches!(cimg.decompress(), Err(Error::UnsupportedCompression(_))),
+                "float compressed image should be unsupported"
+            );
+            checked = true;
+        }
+    }
+    assert!(checked, "expected a compressed-image HDU");
+}
+
+#[cfg(feature = "gzip")]
+#[test]
+fn gzip1_roundtrip_euv() {
+    // GZIP_1 stores raw big-endian image integers per tile; needs the `gzip` feature.
+    assert_rice_roundtrip("EUVEngc4151imgx.fits", "EUVEngc4151imgx.gzip1.fits.fz");
 }

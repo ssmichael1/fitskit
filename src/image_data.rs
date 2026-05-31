@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::header::{Header};
+use crate::header::Header;
 use crate::keyword::HeaderValue;
 use crate::types::Bitpix;
 

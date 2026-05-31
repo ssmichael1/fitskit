@@ -79,9 +79,7 @@ impl Header {
         let mut buf = [0u8; BLOCK_SIZE];
 
         'outer: loop {
-            reader
-                .read_exact(&mut buf)
-                .map_err(Error::Io)?;
+            reader.read_exact(&mut buf).map_err(Error::Io)?;
 
             for i in 0..RECORDS_PER_BLOCK {
                 let start = i * RECORD_SIZE;
@@ -89,7 +87,9 @@ impl Header {
                     buf[start..start + RECORD_SIZE].try_into().unwrap();
 
                 // Check for END keyword
-                if &record[..8] == b"END     " || record[..3] == *b"END" && record[3..8].iter().all(|&b| b == b' ') {
+                if &record[..8] == b"END     "
+                    || record[..3] == *b"END" && record[3..8].iter().all(|&b| b == b' ')
+                {
                     break 'outer;
                 }
 
@@ -162,9 +162,9 @@ impl Header {
         for i in 1..=naxis {
             let key = format!("NAXIS{i}");
             let n = self.require_int(&key)? as usize;
-            product = product.checked_mul(n).ok_or_else(|| {
-                Error::InvalidFormat("axis dimensions overflow".into())
-            })?;
+            product = product
+                .checked_mul(n)
+                .ok_or_else(|| Error::InvalidFormat("axis dimensions overflow".into()))?;
         }
 
         let pcount = self.get_int("PCOUNT").unwrap_or(0) as usize;
@@ -233,7 +233,11 @@ mod tests {
     #[test]
     fn header_round_trip() {
         let mut h = Header::new();
-        h.set("SIMPLE", HeaderValue::Logical(true), Some("conforms to standard"));
+        h.set(
+            "SIMPLE",
+            HeaderValue::Logical(true),
+            Some("conforms to standard"),
+        );
         h.set("BITPIX", HeaderValue::Integer(16), None);
         h.set("NAXIS", HeaderValue::Integer(0), None);
 

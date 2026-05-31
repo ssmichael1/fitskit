@@ -9,8 +9,13 @@ license = "MIT"
 version = "0.25"
 optional = true
 
+[dependencies.miniz_oxide]
+version = "0.8"
+optional = true
+
 [features]
 image = ["dep:image"]
+gzip = ["dep:miniz_oxide"]
 
 [profile.test]
 opt-level = 3
