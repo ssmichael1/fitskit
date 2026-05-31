@@ -266,27 +266,170 @@ fn rice_roundtrip_fgs_i32() {
     assert_rice_roundtrip("FGSf64y0106m_a1f.fits", "FGSf64y0106m_a1f.rice.fits.fz");
 }
 
-/// Float (`ZBITPIX < 0`) RICE fixtures are out of scope: decoding must return the
-/// documented `Err(UnsupportedCompression)` rather than wrong pixels.
-#[test]
-fn rice_float_fixture_is_unsupported() {
-    let fz_path = samp("FOCx38i0101t_c0f.rice_nodith.fits.fz");
+// --- float tile-compression: bit-exact vs funpack -------------------------
+//
+// Quantized-float decompression is *lossy*, so the reconstructed floats will not
+// equal the original uncompressed sample. The authoritative oracle is funpack's own
+// reconstruction: fits4 and funpack must apply the identical dither table + per-tile
+// scaling, so fits4's output must be BIT-IDENTICAL to funpack's. We invoke the
+// `funpack` CLI at test time and compare; the test skips cleanly when either the
+// fixture or the `funpack` binary is absent (so CI without cfitsio stays green).
+
+/// True if a `funpack` binary is on PATH.
+fn funpack_available() -> bool {
+    std::process::Command::new("funpack")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Decompress `fz_name` with the `funpack` CLI into a temp `.fits` and read it back.
+fn funpack_reference(fz_name: &str) -> Option<FitsFile> {
+    let fz_path = samp(fz_name);
+    let mut out = std::env::temp_dir();
+    out.push(format!(
+        "fits4_funpack_ref_{}_{}.fits",
+        std::process::id(),
+        fz_name.replace(['/', '.'], "_")
+    ));
+    let _ = std::fs::remove_file(&out);
+    let status = std::process::Command::new("funpack")
+        .arg("-O")
+        .arg(&out)
+        .arg("-C") // don't update checksums
+        .arg(&fz_path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let f = FitsFile::from_file(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    f
+}
+
+/// Assert that fits4's float decompression of every compressed-image HDU in `fz_name`
+/// is byte-exact against funpack's reconstruction of the same file.
+fn assert_float_matches_funpack(fz_name: &str) {
+    let fz_path = samp(fz_name);
     if !fz_path.exists() {
-        eprintln!("skipping: fixture not present");
+        eprintln!("skipping: fixture {fz_name} not present");
         return;
     }
+    if !funpack_available() {
+        eprintln!("skipping: funpack binary not available");
+        return;
+    }
+    let reference = match funpack_reference(fz_name) {
+        Some(r) => r,
+        None => {
+            eprintln!("skipping: funpack failed on {fz_name}");
+            return;
+        }
+    };
+
+    // funpack reference image HDUs (the reconstructed floats), in order.
+    let ref_images: Vec<&ImageData> = reference
+        .hdus
+        .iter()
+        .filter_map(|h| match &h.data {
+            HduData::Image(im) if !im.pixels.to_bytes().is_empty() => Some(im),
+            _ => None,
+        })
+        .collect();
+
     let fz = FitsFile::from_file(&fz_path).expect("read .fz");
-    let mut checked = false;
+    let mut ref_iter = ref_images.iter();
+    let mut matched = 0usize;
     for hdu in &fz.hdus {
         if let Some(cimg) = hdu.as_compressed_image() {
-            assert!(
-                matches!(cimg.decompress(), Err(Error::UnsupportedCompression(_))),
-                "float compressed image should be unsupported"
+            let reference_img = ref_iter
+                .next()
+                .expect("more compressed images than funpack reference images");
+            let dec = cimg.decompress().expect("fits4 float decompress");
+            assert_eq!(
+                dec.axes, reference_img.axes,
+                "{fz_name}: axes mismatch on compressed HDU #{matched}"
             );
-            checked = true;
+            compare_floats_vs_funpack(fz_name, matched, &dec.pixels, &reference_img.pixels);
+            matched += 1;
         }
     }
-    assert!(checked, "expected a compressed-image HDU");
+    assert!(matched > 0, "{fz_name}: found no compressed-image HDUs");
+}
+
+/// Compare fits4's reconstructed floats against funpack's, element-by-element.
+///
+/// fits4 reproduces cfitsio's unquantization *exactly*, including the fused
+/// multiply-add (`x*scale + zero` contracted to a single FMA) that the cfitsio C code
+/// relies on, so every reconstructed pixel must be bit-identical to funpack's. NaNs
+/// (from `ZBLANK`) only have to match as NaN — IEEE leaves the payload unspecified.
+fn compare_floats_vs_funpack(fz_name: &str, hdu: usize, got: &PixelData, want: &PixelData) {
+    fn cmp(fz_name: &str, hdu: usize, a: f64, b: f64) {
+        if a.is_nan() && b.is_nan() {
+            return;
+        }
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "{fz_name} HDU#{hdu}: fits4={a} ({:#x}) != funpack={b} ({:#x})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
+    match (got, want) {
+        (PixelData::F32(g), PixelData::F32(w)) => {
+            assert_eq!(g.len(), w.len(), "{fz_name} HDU#{hdu}: length mismatch");
+            for (x, y) in g.iter().zip(w.iter()) {
+                cmp(fz_name, hdu, *x as f64, *y as f64);
+            }
+        }
+        (PixelData::F64(g), PixelData::F64(w)) => {
+            assert_eq!(g.len(), w.len(), "{fz_name} HDU#{hdu}: length mismatch");
+            for (x, y) in g.iter().zip(w.iter()) {
+                cmp(fz_name, hdu, *x, *y);
+            }
+        }
+        _ => panic!("{fz_name} HDU#{hdu}: pixel type mismatch vs funpack reference"),
+    }
+}
+
+#[test]
+fn float_rice_nodither_matches_funpack() {
+    // 1024x1024 F32, RICE_1, ZQUANTIZ=NO_DITHER.
+    assert_float_matches_funpack("FOCx38i0101t_c0f.rice_nodith.fits.fz");
+}
+
+#[cfg(feature = "gzip")]
+#[test]
+fn float_gzip_lossless_matches_funpack() {
+    // 1024x1024 F32, GZIP_1, ZQUANTIZ=NONE (raw floats, no quantization). Needs gzip.
+    assert_float_matches_funpack("FOCx38i0101t_c0f.gzip_lossless.fits.fz");
+}
+
+#[test]
+fn float_rice_dither1_matches_funpack() {
+    // 1024x1024 F32, RICE_1, ZQUANTIZ=SUBTRACTIVE_DITHER_1.
+    assert_float_matches_funpack("FOCx38i0101t_c0f.rice_dith.fits.fz");
+}
+
+#[test]
+fn float_rice_dither2_matches_funpack() {
+    // 1024x1024 F32, RICE_1, ZQUANTIZ=SUBTRACTIVE_DITHER_2 (preserves exact zeros),
+    // generated by scripts/gen_compressed_fixtures.sh with `fpack -r -qz5 16`.
+    assert_float_matches_funpack("FOCx38i0101t_c0f.rice_dith2.fits.fz");
+}
+
+#[test]
+fn float_cube_rice_dither1_matches_funpack() {
+    // 200x200x4 F32 cube, RICE_1, SUBTRACTIVE_DITHER_1.
+    assert_float_matches_funpack("WFPC2u5780205r_c0fx.rice_dith.fits.fz");
+}
+
+#[test]
+fn float_cube_rice_nodither_matches_funpack() {
+    // 200x200x4 F32 cube, RICE_1, NO_DITHER.
+    assert_float_matches_funpack("WFPC2u5780205r_c0fx.rice_nodith.fits.fz");
 }
 
 #[cfg(feature = "gzip")]

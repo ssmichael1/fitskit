@@ -105,9 +105,10 @@ compress FGSf64y0106m_a1f.fits    gzip1  -g
 # subtractive dithering; `-q0 <lvl>` (no space) quantizes with NO dithering
 # (ZQUANTIZ=NO_DITHER); lossless float (`-q 0`, level zero) is GZIP-only.
 # FOCx38i0101t_c0f.fits is F32 1024x1024.
-compress FOCx38i0101t_c0f.fits    rice_dith     -r -q 16    # quantize + subtractive dither
-compress FOCx38i0101t_c0f.fits    rice_nodith   -r -q0 16   # quantize, no dithering
-compress FOCx38i0101t_c0f.fits    gzip_lossless -g -q 0     # lossless float (no quantization)
+compress FOCx38i0101t_c0f.fits    rice_dith     -r -q 16     # quantize + SUBTRACTIVE_DITHER_1
+compress FOCx38i0101t_c0f.fits    rice_dith2    -r -qz5 16   # SUBTRACTIVE_DITHER_2, fixed seed 5
+compress FOCx38i0101t_c0f.fits    rice_nodith   -r -q0 16    # quantize, NO_DITHER
+compress FOCx38i0101t_c0f.fits    gzip_lossless -g -q 0      # lossless float (no quantization)
 compress FOCx38i0101t_c0f.fits    hcomp         -h
 
 # WFPC2u5780205r_c0fx.fits is an F32 200x200x4 cube (multi-axis tiling).

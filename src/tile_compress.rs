@@ -74,7 +74,10 @@ impl Quantize {
         match s.map(|v| v.trim().to_ascii_uppercase()) {
             None => Ok(Quantize::None),
             Some(v) => match v.as_str() {
-                "NO_DITHER" => Ok(Quantize::None),
+                // `NONE` is written by cfitsio for losslessly-stored float tiles
+                // (GZIP of the raw floats, no quantization) and is treated like the
+                // absent case here.
+                "NO_DITHER" | "NONE" => Ok(Quantize::None),
                 "SUBTRACTIVE_DITHER_1" => Ok(Quantize::SubtractiveDither1),
                 "SUBTRACTIVE_DITHER_2" => Ok(Quantize::SubtractiveDither2),
                 other => Err(Error::UnsupportedCompression(format!(
@@ -238,10 +241,13 @@ impl<'a> CompressedImage<'a> {
     /// per the tile grid (axis-1 fastest). `ZBLANK` integer sentinels are carried
     /// through unchanged into the output array.
     ///
+    /// Float `ZBITPIX` (-32/-64) images are decoded via [`Self::decompress_float`],
+    /// which inverts the per-tile `ZSCALE`/`ZZERO` quantization and reverses cfitsio's
+    /// subtractive dithering (`ZQUANTIZ` = `SUBTRACTIVE_DITHER_1`/`_2`); `ZBLANK`
+    /// sentinels map to `NaN`.
+    ///
     /// # Not yet supported (see `COMPRESSION_PLAN.md`)
     ///
-    /// - Float `ZBITPIX` (-32/-64): requires quantization inverse (`ZSCALE`/`ZZERO`)
-    ///   and subtractive dithering — phase 3.
     /// - `PLIO_1` — phase 4.
     /// - `HCOMPRESS_1` — phase 5.
     /// - `GZIP_1`/`GZIP_2` without the `gzip` feature return
@@ -250,12 +256,11 @@ impl<'a> CompressedImage<'a> {
         use crate::image_data::{ImageData, PixelData};
         use crate::types::Bitpix;
 
-        // Float originals require quantization inverse + dithering (phase 3).
+        // Float originals (ZBITPIX = -32 / -64) take a separate path: each tile holds
+        // either quantized integers (with per-tile ZSCALE/ZZERO) or, when quantization
+        // was not applied, the raw floats. See `decompress_float`.
         if self.zbitpix < 0 {
-            return Err(Error::UnsupportedCompression(format!(
-                "float ZBITPIX={} (quantization/dithering decode is phase 3, see COMPRESSION_PLAN.md)",
-                self.zbitpix
-            )));
+            return self.decompress_float();
         }
 
         let bitpix = Bitpix::from_i64(self.zbitpix)?;
@@ -310,6 +315,231 @@ impl<'a> CompressedImage<'a> {
         };
 
         Ok(ImageData::new(self.geometry.znaxis.clone(), pixels))
+    }
+
+    /// Decompress a float (`ZBITPIX = -32` / `-64`) tile-compressed image.
+    ///
+    /// Float images are normally stored as per-tile linearly-quantized 32-bit
+    /// integers plus per-tile `ZSCALE`/`ZZERO` scale/offset columns; the integers are
+    /// reconstructed exactly like the integer path, then *unquantized* back to floats.
+    /// cfitsio reverses the subtractive-dithering it applied at compress time using a
+    /// fixed pseudo-random sequence (see [`fits_rand_value`]).
+    ///
+    /// A tile that could not be quantized (e.g. one containing only NaNs, or when
+    /// lossless `GZIP` of the raw floats was requested) is stored instead as the raw
+    /// big-endian float bytes — either in a `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA`
+    /// fallback column for that single tile, or, for a wholly-lossless image, in
+    /// `COMPRESSED_DATA` with no `ZSCALE`/`ZZERO` columns at all. Such tiles are passed
+    /// through verbatim.
+    fn decompress_float(&self) -> Result<crate::image_data::ImageData> {
+        use crate::image_data::{ImageData, PixelData};
+
+        // -32 -> 4-byte floats, -64 -> 8-byte floats.
+        let is_f64 = self.zbitpix == -64;
+        let npix: usize = self.geometry.znaxis.iter().product();
+
+        let tiles_per_axis = self.geometry.tiles_per_axis();
+        let num_tiles = self.geometry.num_tiles();
+        if self.table.nrows < num_tiles {
+            return Err(Error::CompressionError(format!(
+                "compressed image expects {} tiles but BINTABLE has {} rows",
+                num_tiles, self.table.nrows
+            )));
+        }
+
+        let cdata_col = self.compressed_data_column()?;
+        let gzip_fallback_col = self.find_column("GZIP_COMPRESSED_DATA");
+        let uncompressed_col = self.find_column("UNCOMPRESSED_DATA");
+        let zscale_col = self.find_column("ZSCALE");
+        let zzero_col = self.find_column("ZZERO");
+        let zblank_col = self.find_column("ZBLANK");
+
+        // Reconstructed floats, axis-1 fastest, scattered tile-by-tile. We scatter via
+        // the integer `scatter_tile` over a bit-reinterpreted buffer so the existing
+        // (well-tested) geometry code is reused.
+        let mut full_bits = vec![0i64; npix];
+
+        for tile_index in 0..num_tiles {
+            let coords = unravel(tile_index, &tiles_per_axis);
+            let tile_dims = self.tile_dims_at(&coords);
+            let tile_npix: usize = tile_dims.iter().product();
+
+            // Per-tile scale/zero (D columns). A sentinel/absent value marks an
+            // unquantized (raw-float) tile.
+            let zscale = zscale_col.and_then(|c| self.tile_double(tile_index, c));
+            let zzero = zzero_col.and_then(|c| self.tile_double(tile_index, c));
+            // Per-tile blank sentinel (J column) overrides the ZBLANK keyword.
+            let blank = zblank_col
+                .and_then(|c| self.tile_int(tile_index, c))
+                .or(self.blank);
+
+            let cdata = self.tile_bytes(tile_index, cdata_col)?;
+
+            let tile_floats: Vec<f64> = match (zscale, zzero) {
+                // Quantized tile: COMPRESSED_DATA holds quantized integers.
+                (Some(scale), Some(zero)) if !cdata.is_empty() && is_quantized(scale) => {
+                    let q = self.decode_tile(&cdata, tile_npix)?;
+                    self.unquantize(&q, tile_index, scale, zero, blank, tile_npix)
+                }
+                // Unquantized tile (or whole image is lossless): raw floats live in
+                // COMPRESSED_DATA, or in a per-tile fallback column when COMPRESSED_DATA
+                // is empty.
+                _ => {
+                    let (bytes, gzipped) = if !cdata.is_empty() {
+                        // For a lossless GZIP image the raw floats are gzip-compressed
+                        // here; for NOCOMPRESS they are verbatim.
+                        (cdata, self.ctype != CompressionType::NoCompress)
+                    } else if let Some(b) =
+                        gzip_fallback_col.and_then(|c| self.tile_bytes(tile_index, c).ok())
+                    {
+                        (b, true)
+                    } else if let Some(b) =
+                        uncompressed_col.and_then(|c| self.tile_bytes(tile_index, c).ok())
+                    {
+                        (b, false)
+                    } else {
+                        return Err(Error::CompressionError(format!(
+                            "float tile {tile_index} has no quantization scale and no raw-float fallback data"
+                        )));
+                    };
+                    let raw = if gzipped { gzip_inflate(&bytes)? } else { bytes };
+                    raw_floats(&raw, tile_npix, is_f64)?
+                }
+            };
+
+            if tile_floats.len() != tile_npix {
+                return Err(Error::CompressionError(format!(
+                    "float tile {tile_index} produced {} values, expected {tile_npix}",
+                    tile_floats.len()
+                )));
+            }
+
+            // Reinterpret each float's bits as an integer so we can reuse scatter_tile,
+            // then convert back below. (f32 bits zero-extended into i64.)
+            let bits: Vec<i64> = if is_f64 {
+                tile_floats.iter().map(|&v| v.to_bits() as i64).collect()
+            } else {
+                tile_floats
+                    .iter()
+                    .map(|&v| (v as f32).to_bits() as i64)
+                    .collect()
+            };
+            scatter_tile(
+                &mut full_bits,
+                &self.geometry.znaxis,
+                &self.geometry.ztile,
+                &tile_dims,
+                &coords,
+                &bits,
+            );
+        }
+
+        let pixels = if is_f64 {
+            PixelData::F64(full_bits.iter().map(|&b| f64::from_bits(b as u64)).collect())
+        } else {
+            PixelData::F32(
+                full_bits
+                    .iter()
+                    .map(|&b| f32::from_bits(b as u32))
+                    .collect(),
+            )
+        };
+
+        Ok(ImageData::new(self.geometry.znaxis.clone(), pixels))
+    }
+
+    /// Inverse linear quantization with cfitsio's subtractive-dithering reversal.
+    ///
+    /// For each quantized integer `q[i]` of a tile:
+    /// - `q == blank` (ZBLANK / per-tile null sentinel) ⇒ `NaN`.
+    /// - `SUBTRACTIVE_DITHER_2` and `q == ZERO_VALUE (-2147483646)` ⇒ exactly `0.0`.
+    /// - otherwise `value = (q - r + 0.5) * scale + zero`, where `r` is the next value
+    ///   of the fixed pseudo-random sequence ([`fits_rand_value`]); for the
+    ///   non-dithered methods `r` is taken as `0.0` (so `value = q*scale + zero`,
+    ///   matching cfitsio's `fffi4r4`).
+    ///
+    /// The random-sequence indexing mirrors cfitsio `unquantize_i4r4`:
+    /// `iseed = (tile_index + ZDITHER0 - 1) mod N_RANDOM`,
+    /// `nextrand = (int)(fits_rand_value[iseed] * 500)`, advancing `nextrand` per pixel
+    /// and, on reaching `N_RANDOM`, bumping `iseed` (wrapping) and re-deriving
+    /// `nextrand`.
+    fn unquantize(
+        &self,
+        q: &[i64],
+        tile_index: usize,
+        scale: f64,
+        zero: f64,
+        blank: Option<i64>,
+        tile_npix: usize,
+    ) -> Vec<f64> {
+        let dithered = matches!(
+            self.quantize,
+            Quantize::SubtractiveDither1 | Quantize::SubtractiveDither2
+        );
+        let dither2 = self.quantize == Quantize::SubtractiveDither2;
+
+        // ZDITHER0 defaults to 1 when absent (cfitsio fits_read_compressed_img).
+        let zdither0 = self.zdither0.unwrap_or(1);
+        // cfitsio passes row = tile_index_1based + zdither0 - 1, then iseed = (row-1) % N.
+        let mut iseed = ((tile_index as i64 + zdither0 - 1).rem_euclid(N_RANDOM as i64)) as usize;
+        let mut nextrand = (fits_rand_value(iseed) * 500.0) as usize;
+
+        let mut out = Vec::with_capacity(tile_npix);
+        for &qi in q.iter().take(tile_npix) {
+            // cfitsio computes `x * scale + zero` as a single fused multiply-add
+            // (the C compiler contracts the expression), which we must reproduce
+            // exactly via `mul_add` to be bit-identical in catastrophic-cancellation
+            // cases (large `zero` offsets).
+            let value = if blank.is_some_and(|b| qi == b) {
+                f64::NAN
+            } else if dither2 && qi == ZERO_VALUE {
+                0.0
+            } else if dithered {
+                ((qi as f64) - fits_rand_value(nextrand) as f64 + 0.5).mul_add(scale, zero)
+            } else {
+                (qi as f64).mul_add(scale, zero)
+            };
+            out.push(value);
+
+            if dithered {
+                nextrand += 1;
+                if nextrand == N_RANDOM {
+                    iseed += 1;
+                    if iseed == N_RANDOM {
+                        iseed = 0;
+                    }
+                    nextrand = (fits_rand_value(iseed) * 500.0) as usize;
+                }
+            }
+        }
+        out
+    }
+
+    /// Index of a column by (case-insensitive, trimmed) `TTYPE` name, if present.
+    fn find_column(&self, name: &str) -> Option<usize> {
+        self.table
+            .columns
+            .iter()
+            .position(|c| c.name.trim().eq_ignore_ascii_case(name))
+    }
+
+    /// Read a single `D`/`E` scalar cell as `f64` (per-tile ZSCALE/ZZERO).
+    fn tile_double(&self, row: usize, col: usize) -> Option<f64> {
+        match self.table.get_cell(row, col).ok()? {
+            crate::bintable::BinCellValue::F64(v) => v.first().copied(),
+            crate::bintable::BinCellValue::F32(v) => v.first().map(|&x| x as f64),
+            _ => None,
+        }
+    }
+
+    /// Read a single integer scalar cell as `i64` (per-tile ZBLANK).
+    fn tile_int(&self, row: usize, col: usize) -> Option<i64> {
+        match self.table.get_cell(row, col).ok()? {
+            crate::bintable::BinCellValue::I32(v) => v.first().map(|&x| x as i64),
+            crate::bintable::BinCellValue::I64(v) => v.first().copied(),
+            crate::bintable::BinCellValue::I16(v) => v.first().map(|&x| x as i64),
+            _ => None,
+        }
     }
 
     /// Resolve the index of the `COMPRESSED_DATA` column.
@@ -478,6 +708,82 @@ fn scatter_tile(
             tcoord[axis] = 0;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Float quantization / subtractive-dithering reconstruction
+// ---------------------------------------------------------------------------
+//
+// Ported from cfitsio (`imcompress.c` / `quantize.c`, R. White & W. Pence, STScI).
+// Quantized float tiles store each pixel as an i32 produced by
+// `round(value/scale - zero/scale + dither)`; we invert with the same fixed
+// pseudo-random `fits_rand_value` table that cfitsio uses.
+
+/// Length of cfitsio's fixed pseudo-random sequence (`N_RANDOM`). Do not change.
+const N_RANDOM: usize = 10000;
+
+/// Sentinel quantized value flagging an undefined (NaN) pixel (cfitsio `NULL_VALUE`).
+/// Carried here for documentation; the actual null sentinel is taken from
+/// `ZBLANK` (keyword or per-tile column), which equals this for cfitsio-written files.
+#[allow(dead_code)]
+const NULL_VALUE: i64 = -2_147_483_647;
+
+/// Sentinel quantized value flagging an exact-zero pixel under
+/// `SUBTRACTIVE_DITHER_2` (cfitsio `ZERO_VALUE`).
+const ZERO_VALUE: i64 = -2_147_483_646;
+
+/// True if a per-tile `ZSCALE` indicates a quantized tile. cfitsio treats a zero
+/// scale (its `cn_zscale == 0` / absent-scale default) as "not quantized".
+fn is_quantized(zscale: f64) -> bool {
+    zscale != 0.0
+}
+
+/// Reinterpret big-endian bytes as `n` floats (f32 if `!is_f64`, else f64), widened
+/// to `f64` for uniform downstream handling. Used for unquantized (raw-float) tiles.
+fn raw_floats(bytes: &[u8], n: usize, is_f64: bool) -> Result<Vec<f64>> {
+    let width = if is_f64 { 8 } else { 4 };
+    if bytes.len() < n * width {
+        return Err(Error::CompressionError(format!(
+            "raw float tile has {} bytes, expected at least {}",
+            bytes.len(),
+            n * width
+        )));
+    }
+    let mut out = Vec::with_capacity(n);
+    for c in bytes.chunks_exact(width).take(n) {
+        let v = if is_f64 {
+            f64::from_be_bytes(c.try_into().unwrap())
+        } else {
+            f32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f64
+        };
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// The `ii`-th element of cfitsio's fixed pseudo-random sequence.
+///
+/// Generated once (lazily) by the Park–Miller minimal-standard LCG
+/// (`a = 16807`, `m = 2^31 - 1`, seed 1) exactly as cfitsio's `fits_init_randoms`:
+/// `seed_{k+1} = (a*seed_k) mod m`, value = `seed / m`. The 10000-element table is
+/// validated against cfitsio's published checkpoint (final seed `1043618065`).
+fn fits_rand_value(ii: usize) -> f32 {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let a = 16807.0f64;
+        let m = 2_147_483_647.0f64;
+        let mut seed = 1.0f64;
+        let mut v = Vec::with_capacity(N_RANDOM);
+        for _ in 0..N_RANDOM {
+            let temp = a * seed;
+            // cfitsio: seed = temp - m * (int)(temp / m)
+            seed = temp - m * ((temp / m) as i64 as f64);
+            v.push((seed / m) as f32);
+        }
+        v
+    });
+    table[ii % N_RANDOM]
 }
 
 /// Count the contiguous `ZNAMEi`/`ZVALi` parameter pairs present in the header.
@@ -941,9 +1247,8 @@ mod tests {
         // tile dims: (0,0)=2x2, (1,0)=1x2, (0,1)=2x1, (1,1)=1x1
         let tile_dims = [vec![2, 2], vec![1, 2], vec![2, 1], vec![1, 1]];
         let mut full = vec![-1i64; 9];
-        for tile in 0..4 {
+        for (tile, td) in tile_dims.iter().enumerate() {
             let coords = unravel(tile, &tiles_per_axis);
-            let td = &tile_dims[tile];
             let n: usize = td.iter().product();
             let vals: Vec<i64> = (0..n).map(|l| (tile as i64) * 100 + l as i64).collect();
             scatter_tile(&mut full, &image_dims, &ztile, td, &coords, &vals);
@@ -1088,22 +1393,110 @@ mod tests {
     }
 
     #[test]
-    fn float_zbitpix_is_unsupported() {
+    fn fits_rand_value_matches_cfitsio_checkpoint() {
+        // cfitsio validates fits_init_randoms by asserting the final LCG seed is
+        // 1043618065 after 10000 iterations. Reproduce that seed and check it, which
+        // exercises the exact same recurrence our table generator uses.
+        let a = 16807.0f64;
+        let m = 2_147_483_647.0f64;
+        let mut seed = 1.0f64;
+        for _ in 0..N_RANDOM {
+            let temp = a * seed;
+            seed = temp - m * ((temp / m) as i64 as f64);
+        }
+        assert_eq!(seed as i64, 1_043_618_065);
+        // All table values lie in [0, 1).
+        for i in [0usize, 1, 499, 5000, N_RANDOM - 1] {
+            let v = fits_rand_value(i);
+            assert!((0.0..1.0).contains(&v), "rand[{i}] = {v} out of range");
+        }
+    }
+
+    #[test]
+    fn nodither_float_constant_tile() {
+        // A NO_DITHER quantized float tile: value = q*scale + zero (no +0.5, no dither).
         use crate::bintable::{BinColumnType, BinTableBuilder};
+
+        // 2-pixel image, single row tile, quantized ints [10, 20], scale 0.5, zero 3.0.
+        let q = [10i32, 20];
+        let enc = rice_encode_i32(&q, 2);
+
         let table = BinTableBuilder::new()
             .add_column("COMPRESSED_DATA", BinColumnType::VarP('B'))
-            .push_row(|r| r.write_var_p(0, |_| {}))
+            .add_column("ZSCALE", BinColumnType::D64(1))
+            .add_column("ZZERO", BinColumnType::D64(1))
+            .push_row(|r| {
+                r.write_var_p(enc.len() as i32, |heap| heap.extend_from_slice(&enc));
+                r.write_f64(0.5);
+                r.write_f64(3.0);
+            })
             .build();
+
         let mut h = Header::new();
         h.set("ZIMAGE", HeaderValue::Logical(true), None);
         h.set("ZCMPTYPE", HeaderValue::String("RICE_1".into()), None);
         h.set("ZBITPIX", HeaderValue::Integer(-32), None);
         h.set("ZNAXIS", HeaderValue::Integer(1), None);
         h.set("ZNAXIS1", HeaderValue::Integer(2), None);
+        h.set("ZQUANTIZ", HeaderValue::String("NO_DITHER".into()), None);
+        h.set("ZNAME1", HeaderValue::String("BYTEPIX".into()), None);
+        h.set("ZVAL1", HeaderValue::Integer(4), None);
+
         let cimg = CompressedImage::from_bintable(&h, &table).unwrap();
-        assert!(matches!(
-            cimg.decompress(),
-            Err(Error::UnsupportedCompression(_))
-        ));
+        let img = cimg.decompress().unwrap();
+        match img.pixels {
+            crate::image_data::PixelData::F32(v) => {
+                assert_eq!(v, vec![10.0 * 0.5 + 3.0, 20.0 * 0.5 + 3.0]);
+            }
+            other => panic!("expected F32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dither2_preserves_zero_and_blank_maps_to_nan() {
+        use crate::bintable::{BinColumnType, BinTableBuilder};
+
+        // 3-pixel tile: [ZERO_VALUE, NULL/blank, 5]. DITHER_2 => [0.0, NaN, dithered].
+        // Use NOCOMPRESS so the quantized ints are stored verbatim (RICE encoding of
+        // these extreme values is awkward and unrelated to what we're testing here).
+        let q = [ZERO_VALUE as i32, NULL_VALUE as i32, 5];
+        let mut enc = Vec::new();
+        for v in q {
+            enc.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let table = BinTableBuilder::new()
+            .add_column("COMPRESSED_DATA", BinColumnType::VarP('B'))
+            .add_column("ZSCALE", BinColumnType::D64(1))
+            .add_column("ZZERO", BinColumnType::D64(1))
+            .push_row(|r| {
+                r.write_var_p(enc.len() as i32, |heap| heap.extend_from_slice(&enc));
+                r.write_f64(2.0);
+                r.write_f64(1.0);
+            })
+            .build();
+
+        let mut h = Header::new();
+        h.set("ZIMAGE", HeaderValue::Logical(true), None);
+        h.set("ZCMPTYPE", HeaderValue::String("NOCOMPRESS".into()), None);
+        h.set("ZBITPIX", HeaderValue::Integer(-32), None);
+        h.set("ZNAXIS", HeaderValue::Integer(1), None);
+        h.set("ZNAXIS1", HeaderValue::Integer(3), None);
+        h.set("ZQUANTIZ", HeaderValue::String("SUBTRACTIVE_DITHER_2".into()), None);
+        h.set("ZDITHER0", HeaderValue::Integer(5), None);
+        h.set("ZBLANK", HeaderValue::Integer(NULL_VALUE), None);
+        h.set("ZNAME1", HeaderValue::String("BYTEPIX".into()), None);
+        h.set("ZVAL1", HeaderValue::Integer(4), None);
+
+        let cimg = CompressedImage::from_bintable(&h, &table).unwrap();
+        let img = cimg.decompress().unwrap();
+        match img.pixels {
+            crate::image_data::PixelData::F32(v) => {
+                assert_eq!(v[0], 0.0); // ZERO_VALUE preserved exactly
+                assert!(v[1].is_nan()); // blank -> NaN
+                assert!(v[2].is_finite() && v[2] != 0.0);
+            }
+            other => panic!("expected F32, got {other:?}"),
+        }
     }
 }
