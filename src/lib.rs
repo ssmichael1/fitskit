@@ -68,6 +68,54 @@
 //! assert_eq!(bytes.len() % 2880, 0); // block-aligned
 //! ```
 //!
+//! ## Binary tables
+//!
+//! Build a `BINTABLE` extension column-by-column, then push it onto a file:
+//!
+//! ```
+//! use fitskit::{FitsFile, Hdu, BinTableBuilder, BinColumnType};
+//!
+//! let table = BinTableBuilder::new()
+//!     .add_column("RA", BinColumnType::D64(1))
+//!     .add_column("DEC", BinColumnType::D64(1))
+//!     .add_column("MAG", BinColumnType::E32(1))
+//!     .push_row(|row| {
+//!         row.write_f64(180.0);
+//!         row.write_f64(45.0);
+//!         row.write_f32(12.5);
+//!     })
+//!     .build();
+//!
+//! let mut fits = FitsFile::with_empty_primary();
+//! fits.push_extension(Hdu::bintable_extension(table));
+//! let _ = fits.to_bytes().unwrap();
+//! ```
+//!
+//! ## Tile-compressed images
+//!
+//! [`ImageData::compress`](image_data::ImageData::compress) produces a compressed-image
+//! `BINTABLE` HDU; [`Hdu::as_compressed_image`](hdu::Hdu::as_compressed_image) +
+//! [`CompressedImage::decompress`](tile_compress::CompressedImage::decompress) read it
+//! back. RICE_1 is lossless for integers, so this round-trips exactly:
+//!
+//! ```
+//! use fitskit::{FitsFile, ImageData, PixelData, CompressOptions, HduData};
+//!
+//! let pixels: Vec<i16> = (0..10000).map(|i| (i % 1000) as i16).collect();
+//! let img = ImageData::new(vec![100, 100], PixelData::I16(pixels.clone()));
+//!
+//! // Compress (default: RICE_1, one tile per row) into a BINTABLE HDU and write it.
+//! let mut fits = FitsFile::with_empty_primary();
+//! fits.push_extension(img.compress(&CompressOptions::default()).unwrap());
+//! let bytes = fits.to_bytes().unwrap();
+//!
+//! // Read back and decompress.
+//! let fits2 = FitsFile::from_bytes(&bytes).unwrap();
+//! let cimg = fits2.extensions()[0].as_compressed_image().unwrap();
+//! let restored = cimg.decompress().unwrap();
+//! assert!(matches!(restored.pixels, PixelData::I16(ref v) if *v == pixels));
+//! ```
+//!
 //! ## BSCALE/BZERO
 //!
 //! Physical values are computed as `BZERO + BSCALE * array_value`. The unsigned
@@ -98,13 +146,32 @@
 //! fits2.primary().verify_datasum().unwrap();
 //! ```
 //!
+//! ## Core types
+//!
+//! A FITS file is an ordered sequence of Header-Data Units (HDUs):
+//!
+//! - [`FitsFile`] — top-level container ([`Vec<Hdu>`](Hdu)); reads/writes files,
+//!   bytes, or any `Read`/`Write`, plus builder methods.
+//! - [`Hdu`] — one HDU: a [`Header`] plus an [`HduData`] payload.
+//! - [`HduData`] — payload enum: `Empty`, `Image`, `AsciiTable`, `BinTable`.
+//! - [`Header`] / [`Keyword`] / [`HeaderValue`] — ordered cards with typed accessors.
+//! - [`ImageData`] / [`PixelData`] — axes plus a typed pixel buffer; raw and
+//!   BSCALE/BZERO-scaled access.
+//! - [`BinTable`] / [`BinColumn`] / [`BinColumnType`] / [`BinCellValue`] — binary-table
+//!   model (with VLA heap), built via [`BinTableBuilder`].
+//! - [`AsciiTable`] — ASCII `TABLE` model.
+//! - [`CompressedImage`] / [`CompressionType`] / [`CompressOptions`] — tile-compression
+//!   read view and write options.
+//! - [`Bitpix`] — the `BITPIX` data type; [`Error`] / [`Result`] — error handling.
+//!
 //! ## Feature flags
 //!
 //! - **`image`** — enables conversion between [`ImageData`] and the
 //!   [`image`](https://crates.io/crates/image) crate's `DynamicImage`.
-//! - **`gzip`** — enables decoding of `GZIP_1`/`GZIP_2` tile-compressed images via
-//!   the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide) crate. The
-//!   default build stays dependency-free; `RICE_1` works without this feature.
+//! - **`gzip`** — enables encoding *and* decoding of `GZIP_1`/`GZIP_2` tile-compressed
+//!   images via the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide)
+//!   crate. The default build stays dependency-free; `RICE_1` (read and write),
+//!   `PLIO_1`, and `HCOMPRESS_1` decoding all work without this feature.
 
 pub mod ascii_table;
 pub mod bintable;
