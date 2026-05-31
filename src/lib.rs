@@ -1,4 +1,4 @@
-//! # fits4 — Pure Rust FITS v4.0 reader/writer
+//! # fitskit — Pure Rust FITS v4.0 reader/writer
 //!
 //! A zero-dependency implementation of the FITS (Flexible Image Transport System)
 //! standard v4.0 for reading and writing astronomical data files.
@@ -26,7 +26,7 @@
 //! ## Quick start — reading
 //!
 //! ```no_run
-//! use fits4::{FitsFile, HduData, PixelData};
+//! use fitskit::{FitsFile, HduData, PixelData};
 //!
 //! let fits = FitsFile::from_file("image.fits").unwrap();
 //!
@@ -55,7 +55,7 @@
 //! ## Quick start — writing
 //!
 //! ```
-//! use fits4::{FitsFile, Hdu, ImageData, PixelData, HeaderValue};
+//! use fitskit::{FitsFile, Hdu, ImageData, PixelData, HeaderValue};
 //!
 //! // Create a 100x100 16-bit image
 //! let pixels: Vec<i16> = (0..10000).map(|i| (i % 1000) as i16).collect();
@@ -74,7 +74,7 @@
 //! integer convention stores unsigned values in signed storage:
 //!
 //! ```
-//! use fits4::{ImageData, PixelData};
+//! use fitskit::{ImageData, PixelData};
 //!
 //! // Unsigned u16 via BZERO=32768
 //! let img = ImageData::new(vec![3], PixelData::I16(vec![-32768, 0, 32767]));
@@ -87,7 +87,7 @@
 //! Write with CHECKSUM/DATASUM integrity keywords:
 //!
 //! ```
-//! use fits4::{FitsFile, ImageData, PixelData};
+//! use fitskit::{FitsFile, ImageData, PixelData};
 //!
 //! let img = ImageData::new(vec![4], PixelData::U8(vec![1, 2, 3, 4]));
 //! let fits = FitsFile::with_primary_image(img);

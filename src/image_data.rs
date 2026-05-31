@@ -163,8 +163,8 @@ impl ImageData {
     /// [`CompressedImage::decompress`](crate::tile_compress::CompressedImage::decompress).
     ///
     /// ```
-    /// use fits4::{ImageData, PixelData};
-    /// use fits4::tile_compress::CompressOptions;
+    /// use fitskit::{ImageData, PixelData};
+    /// use fitskit::tile_compress::CompressOptions;
     ///
     /// let img = ImageData::new(vec![8, 4], PixelData::I16((0..32).collect()));
     /// let hdu = img.compress(&CompressOptions::default()).unwrap();

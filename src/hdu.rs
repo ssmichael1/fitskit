@@ -109,7 +109,7 @@ impl Hdu {
     /// decoding happens in [`CompressedImage::decompress`]:
     ///
     /// ```no_run
-    /// # use fits4::FitsFile;
+    /// # use fitskit::FitsFile;
     /// # let fits = FitsFile::from_file("compressed.fits").unwrap();
     /// for hdu in fits.extensions() {
     ///     if let Some(cimg) = hdu.as_compressed_image() {

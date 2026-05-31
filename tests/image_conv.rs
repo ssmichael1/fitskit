@@ -1,6 +1,6 @@
 #![cfg(feature = "image")]
 
-use fits4::*;
+use fitskit::*;
 use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
 type Gray16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 

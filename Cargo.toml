@@ -1,9 +1,15 @@
 [package]
-name = "fits4"
+name = "fitskit"
 version = "0.1.0"
 edition = "2021"
-description = "Pure Rust FITS v4.0 reader/writer"
+description = "Pure Rust FITS v4.0 reader/writer with tile-compression read and write"
 license = "MIT"
+repository = "https://github.com/ssmichael1/fitskit"
+documentation = "https://docs.rs/fitskit"
+readme = "README.md"
+keywords = ["fits", "astronomy", "fits-file", "compression", "image"]
+categories = ["science", "encoding", "parser-implementations"]
+authors = ["Steven Michael <ssmichael@gmail.com>"]
 
 [dependencies.image]
 version = "0.25"

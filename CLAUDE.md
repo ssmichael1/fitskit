@@ -1,4 +1,4 @@
-# fits4 — Pure Rust FITS v4.0 Library
+# fitskit — Pure Rust FITS v4.0 Library
 
 ## Build Commands
 

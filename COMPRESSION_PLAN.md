@@ -2,7 +2,7 @@
 
 Status: planning + initial scaffold. This document describes how to add support for
 the FITS *Tiled Image Compression* convention (the BINTABLE-based compressed-image
-format) to `fits4`, currently the main feature gap versus `fitsrs`.
+format) to `fitskit`, currently the main feature gap versus `fitsrs`.
 
 References:
 - Tiled Image Convention for Storing Compressed Images in FITS Binary Tables,

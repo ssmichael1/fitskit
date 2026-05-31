@@ -1,4 +1,4 @@
-use fits4::*;
+use fitskit::*;
 
 #[test]
 fn round_trip_empty_primary() {
@@ -228,7 +228,7 @@ fn round_trip_bscale_bzero() {
 
 #[test]
 fn round_trip_bintable() {
-    use fits4::bintable::{BinCellValue, BinColumn, BinColumnType};
+    use fitskit::bintable::{BinCellValue, BinColumn, BinColumnType};
 
     // Build a simple bintable with 2 rows, 3 columns: i32, f64, 8-char string
     let col_j = BinColumn {
@@ -325,7 +325,7 @@ fn round_trip_bintable() {
 
 #[test]
 fn round_trip_bintable_vla() {
-    use fits4::bintable::{BinCellValue, BinColumn, BinColumnType};
+    use fitskit::bintable::{BinCellValue, BinColumn, BinColumnType};
 
     // Variable-length array column using P descriptor
     let col = BinColumn {
@@ -389,7 +389,7 @@ fn round_trip_bintable_vla() {
 
 #[test]
 fn round_trip_ascii_table() {
-    use fits4::ascii_table::{AsciiColumn, AsciiFormat, AsciiTable};
+    use fitskit::ascii_table::{AsciiColumn, AsciiFormat, AsciiTable};
 
     // 2 rows, 2 columns: name (A10) and value (F10.3)
     let col_name = AsciiColumn {
@@ -497,7 +497,7 @@ fn header_keyword_preservation() {
         .push(Keyword::commentary("COMMENT", "Test comment line"));
     fits.primary_mut()
         .header
-        .push(Keyword::commentary("HISTORY", "Created by fits4 tests"));
+        .push(Keyword::commentary("HISTORY", "Created by fitskit tests"));
     fits.primary_mut()
         .header
         .set("AUTHOR", HeaderValue::String("test".into()), None);

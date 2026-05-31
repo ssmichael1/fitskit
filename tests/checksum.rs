@@ -1,5 +1,5 @@
-use fits4::checksum;
-use fits4::*;
+use fitskit::checksum;
+use fitskit::*;
 
 #[test]
 fn write_with_checksum_and_verify() {
@@ -31,7 +31,7 @@ fn write_with_checksum_and_verify() {
 
 #[test]
 fn checksum_with_extensions() {
-    use fits4::bintable::{BinColumn, BinColumnType};
+    use fitskit::bintable::{BinColumn, BinColumnType};
 
     let mut fits = FitsFile::with_empty_primary();
 
@@ -47,7 +47,7 @@ fn checksum_with_extensions() {
     main_data[0..8].copy_from_slice(&3.125f64.to_be_bytes());
     main_data[8..16].copy_from_slice(&2.5f64.to_be_bytes());
 
-    let table = fits4::BinTable {
+    let table = fitskit::BinTable {
         columns: vec![col],
         nrows: 2,
         row_len,

@@ -510,7 +510,7 @@ impl BinTable {
 /// Builder for constructing a `BinTable` row by row.
 ///
 /// ```
-/// use fits4::{BinTableBuilder, BinColumnType};
+/// use fitskit::{BinTableBuilder, BinColumnType};
 ///
 /// let table = BinTableBuilder::new()
 ///     .add_column("RA", BinColumnType::D64(1))

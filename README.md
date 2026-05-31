@@ -1,10 +1,10 @@
-# fits4
+# fitskit
 
 **Pure-Rust, zero-dependency reader and writer for [FITS](https://fits.gsfc.nasa.gov/fits_standard.html) v4.0** — the Flexible Image Transport System format used throughout astronomy.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-fits4 reads *and* writes the full FITS v4.0 standard — primary and extension HDUs, images, ASCII tables, and binary tables (including variable-length arrays) — with **no external dependencies** in the default build and **no C toolchain** required. It decodes every tile-compressed image type in the standard (RICE, GZIP, PLIO, HCOMPRESS) and — uniquely among pure-Rust FITS crates — **writes** RICE- and GZIP-compressed images that cfitsio's `funpack` reads back byte-for-byte.
+fitskit reads *and* writes the full FITS v4.0 standard — primary and extension HDUs, images, ASCII tables, and binary tables (including variable-length arrays) — with **no external dependencies** in the default build and **no C toolchain** required. It decodes every tile-compressed image type in the standard (RICE, GZIP, PLIO, HCOMPRESS) and — uniquely among pure-Rust FITS crates — **writes** RICE- and GZIP-compressed images that cfitsio's `funpack` reads back byte-for-byte.
 
 ## Features
 
@@ -22,7 +22,7 @@ fits4 reads *and* writes the full FITS v4.0 standard — primary and extension H
 
 ```toml
 [dependencies]
-fits4 = "0.1"
+fitskit = "0.1"
 ```
 
 ## Usage
@@ -30,7 +30,7 @@ fits4 = "0.1"
 ### Reading a FITS file
 
 ```rust
-use fits4::{FitsFile, HduData, PixelData};
+use fitskit::{FitsFile, HduData, PixelData};
 
 let fits = FitsFile::from_file("image.fits")?;
 
@@ -52,13 +52,13 @@ for hdu in fits.extensions() {
         HduData::Empty => {}
     }
 }
-# Ok::<(), fits4::Error>(())
+# Ok::<(), fitskit::Error>(())
 ```
 
 ### Writing a FITS file
 
 ```rust
-use fits4::{FitsFile, ImageData, PixelData, HeaderValue};
+use fitskit::{FitsFile, ImageData, PixelData, HeaderValue};
 
 let pixels: Vec<i16> = (0..10000).map(|i| (i % 1000) as i16).collect();
 let img = ImageData::new(vec![100, 100], PixelData::I16(pixels));
@@ -67,13 +67,13 @@ let mut fits = FitsFile::with_primary_image(img);
 fits.primary_mut().header.set("OBJECT", HeaderValue::String("M31".into()), None);
 
 fits.to_file("output.fits")?;
-# Ok::<(), fits4::Error>(())
+# Ok::<(), fitskit::Error>(())
 ```
 
 ### Building a binary table
 
 ```rust
-use fits4::{FitsFile, Hdu, BinTableBuilder, BinColumnType};
+use fitskit::{FitsFile, Hdu, BinTableBuilder, BinColumnType};
 
 let table = BinTableBuilder::new()
     .add_column("RA", BinColumnType::D64(1))
@@ -103,7 +103,7 @@ Tiled Image Compression convention). `Hdu::as_compressed_image` cheaply detects
 them; `decompress` reassembles the full image lazily.
 
 ```rust
-use fits4::FitsFile;
+use fitskit::FitsFile;
 
 let fits = FitsFile::from_file("compressed.fits")?;
 
@@ -114,7 +114,7 @@ for hdu in fits.extensions() {
         println!("decompressed to {:?}", image.axes);
     }
 }
-# Ok::<(), fits4::Error>(())
+# Ok::<(), fitskit::Error>(())
 ```
 
 ### Writing a tile-compressed image
@@ -123,7 +123,7 @@ for hdu in fits.extensions() {
 into a file. The output is read back byte-for-byte by cfitsio's `funpack`.
 
 ```rust
-use fits4::{FitsFile, ImageData, PixelData, CompressOptions};
+use fitskit::{FitsFile, ImageData, PixelData, CompressOptions};
 
 let pixels: Vec<i16> = (0..10000).map(|i| (i % 1000) as i16).collect();
 let img = ImageData::new(vec![100, 100], PixelData::I16(pixels));
@@ -134,13 +134,13 @@ let hdu = img.compress(&CompressOptions::default())?;
 let mut fits = FitsFile::with_empty_primary();
 fits.push_extension(hdu);
 fits.to_file("compressed.fits")?;
-# Ok::<(), fits4::Error>(())
+# Ok::<(), fitskit::Error>(())
 ```
 
 ### Checksums
 
 ```rust
-use fits4::{FitsFile, ImageData, PixelData};
+use fitskit::{FitsFile, ImageData, PixelData};
 
 let img = ImageData::new(vec![4], PixelData::U8(vec![1, 2, 3, 4]));
 let fits = FitsFile::with_primary_image(img);
@@ -151,12 +151,12 @@ let bytes = fits.to_bytes_with_checksum()?;
 // Verify on read
 let fits2 = FitsFile::from_bytes(&bytes)?;
 fits2.primary().verify_datasum()?;
-# Ok::<(), fits4::Error>(())
+# Ok::<(), fitskit::Error>(())
 ```
 
 ## Core types
 
-A FITS file is an ordered sequence of **Header-Data Units (HDUs)**. fits4 mirrors
+A FITS file is an ordered sequence of **Header-Data Units (HDUs)**. fitskit mirrors
 that structure directly:
 
 | Type | Role |
@@ -188,16 +188,16 @@ are preserved for a lossless round-trip write.
 
 The default build stays dependency-free; `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` decompression and `RICE_1` compression all work without any feature (only `GZIP_1`/`GZIP_2` need the `gzip` feature).
 
-## Why fits4?
+## Why fitskit?
 
-Among Rust FITS crates, fits4 fills a specific niche — **pure Rust, zero default dependencies, full read + write including tables, complete compressed-image reading, and compressed-image writing**, with no C toolchain to install. No other pure-Rust crate writes compressed FITS.
+Among Rust FITS crates, fitskit fills a specific niche — **pure Rust, zero default dependencies, full read + write including tables, complete compressed-image reading, and compressed-image writing**, with no C toolchain to install. No other pure-Rust crate writes compressed FITS.
 
 | Crate | Pure Rust | Write | Tables | Compressed read | Compressed write | Notes |
 |-------|-----------|-------|--------|-----------------|------------------|-------|
 | [`fitsio`](https://crates.io/crates/fitsio) | ✗ | ✓ | ✓ | ✓ | ✓ | Wraps the cfitsio C library; needs a C toolchain |
 | [`fitsrs`](https://crates.io/crates/fitsrs) | ✓ | ✗ | partial | — | ✗ | Read-only |
 | [`fitrs`](https://crates.io/crates/fitrs) | ✓ | ✓ | ✗ | ✗ | ✗ | Dormant; no table support |
-| **fits4** | ✓ | ✓ | ✓ | ✓ (all types) | ✓ (RICE/GZIP) | Zero default deps; no C dependency |
+| **fitskit** | ✓ | ✓ | ✓ | ✓ (all types) | ✓ (RICE/GZIP) | Zero default deps; no C dependency |
 
 ## Supported / not supported
 

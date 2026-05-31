@@ -1,7 +1,7 @@
 //! Tests reading NASA sample FITS files from the samp/ directory.
 //! These tests are skipped if the samp/ directory is not present.
 
-use fits4::*;
+use fitskit::*;
 use std::path::Path;
 
 const SAMP_DIR: &str = "samp";
@@ -288,8 +288,8 @@ fn hcompress_int_roundtrip_euv() {
 //
 // Quantized-float decompression is *lossy*, so the reconstructed floats will not
 // equal the original uncompressed sample. The authoritative oracle is funpack's own
-// reconstruction: fits4 and funpack must apply the identical dither table + per-tile
-// scaling, so fits4's output must be BIT-IDENTICAL to funpack's. We invoke the
+// reconstruction: fitskit and funpack must apply the identical dither table + per-tile
+// scaling, so fitskit's output must be BIT-IDENTICAL to funpack's. We invoke the
 // `funpack` CLI at test time and compare; the test skips cleanly when either the
 // fixture or the `funpack` binary is absent (so CI without cfitsio stays green).
 
@@ -307,7 +307,7 @@ fn funpack_reference(fz_name: &str) -> Option<FitsFile> {
     let fz_path = samp(fz_name);
     let mut out = std::env::temp_dir();
     out.push(format!(
-        "fits4_funpack_ref_{}_{}.fits",
+        "fitskit_funpack_ref_{}_{}.fits",
         std::process::id(),
         fz_name.replace(['/', '.'], "_")
     ));
@@ -327,7 +327,7 @@ fn funpack_reference(fz_name: &str) -> Option<FitsFile> {
     f
 }
 
-/// Assert that fits4's float decompression of every compressed-image HDU in `fz_name`
+/// Assert that fitskit's float decompression of every compressed-image HDU in `fz_name`
 /// is byte-exact against funpack's reconstruction of the same file.
 fn assert_float_matches_funpack(fz_name: &str) {
     let fz_path = samp(fz_name);
@@ -365,7 +365,7 @@ fn assert_float_matches_funpack(fz_name: &str) {
             let reference_img = ref_iter
                 .next()
                 .expect("more compressed images than funpack reference images");
-            let dec = cimg.decompress().expect("fits4 float decompress");
+            let dec = cimg.decompress().expect("fitskit float decompress");
             assert_eq!(
                 dec.axes, reference_img.axes,
                 "{fz_name}: axes mismatch on compressed HDU #{matched}"
@@ -377,9 +377,9 @@ fn assert_float_matches_funpack(fz_name: &str) {
     assert!(matched > 0, "{fz_name}: found no compressed-image HDUs");
 }
 
-/// Compare fits4's reconstructed floats against funpack's, element-by-element.
+/// Compare fitskit's reconstructed floats against funpack's, element-by-element.
 ///
-/// fits4 reproduces cfitsio's unquantization *exactly*, including the fused
+/// fitskit reproduces cfitsio's unquantization *exactly*, including the fused
 /// multiply-add (`x*scale + zero` contracted to a single FMA) that the cfitsio C code
 /// relies on, so every reconstructed pixel must be bit-identical to funpack's. NaNs
 /// (from `ZBLANK`) only have to match as NaN — IEEE leaves the payload unspecified.
@@ -390,7 +390,7 @@ fn compare_floats_vs_funpack(fz_name: &str, hdu: usize, got: &PixelData, want: &
         }
         assert!(
             a.to_bits() == b.to_bits(),
-            "{fz_name} HDU#{hdu}: fits4={a} ({:#x}) != funpack={b} ({:#x})",
+            "{fz_name} HDU#{hdu}: fitskit={a} ({:#x}) != funpack={b} ({:#x})",
             a.to_bits(),
             b.to_bits()
         );
@@ -465,18 +465,18 @@ fn gzip1_roundtrip_euv() {
     assert_rice_roundtrip("EUVEngc4151imgx.fits", "EUVEngc4151imgx.gzip1.fits.fz");
 }
 
-// === ENCODE (write) path: fits4 produces tile-compressed FITS ================
+// === ENCODE (write) path: fitskit produces tile-compressed FITS ================
 //
 // Two oracles per algorithm:
 //   (1) internal: image.compress(opts) -> as_compressed_image().decompress() == image
 //       (byte-exact for lossless RICE/GZIP int + lossless-float GZIP).
-//   (2) interop:  write the fits4-compressed file, run the `funpack` CLI on it, and
+//   (2) interop:  write the fitskit-compressed file, run the `funpack` CLI on it, and
 //       confirm funpack's reconstruction matches the original image (byte-exact for
-//       lossless cases). This proves fits4 emits standard, cfitsio-readable compressed
+//       lossless cases). This proves fitskit emits standard, cfitsio-readable compressed
 //       FITS. Skipped cleanly when samples or `funpack` are absent.
 
-use fits4::tile_compress::CompressOptions;
-use fits4::{CompressionType, Quantize};
+use fitskit::tile_compress::CompressOptions;
+use fitskit::{CompressionType, Quantize};
 
 /// Collect the non-empty image HDUs (primary + extensions) of an uncompressed sample.
 fn sample_images(src_name: &str) -> Vec<ImageData> {
@@ -490,7 +490,7 @@ fn sample_images(src_name: &str) -> Vec<ImageData> {
         .collect()
 }
 
-/// Build a fits4 `.fz`-style FitsFile: empty primary + one compressed-image extension
+/// Build a fitskit `.fz`-style FitsFile: empty primary + one compressed-image extension
 /// per source image, all using `opts`.
 fn compress_sample(images: &[ImageData], opts: &CompressOptions) -> FitsFile {
     let mut fits = FitsFile::with_empty_primary();
@@ -533,8 +533,8 @@ fn assert_internal_roundtrip(images: &[ImageData], opts: &CompressOptions) {
     assert_eq!(n, images.len(), "reread: compressed HDU count");
 }
 
-/// Interop: funpack reads fits4's compressed output back to `images` (byte-exact).
-fn assert_funpack_reads_fits4(src_name: &str, opts: &CompressOptions, tag: &str) {
+/// Interop: funpack reads fitskit's compressed output back to `images` (byte-exact).
+fn assert_funpack_reads_fitskit(src_name: &str, opts: &CompressOptions, tag: &str) {
     if !Path::new(SAMP_DIR).is_dir() {
         eprintln!("skipping: samp/ not present");
         return;
@@ -549,12 +549,12 @@ fn assert_funpack_reads_fits4(src_name: &str, opts: &CompressOptions, tag: &str)
 
     // funpack requires the file to be named *.fz.
     let mut fz = std::env::temp_dir();
-    fz.push(format!("fits4_enc_{}_{}.fits.fz", std::process::id(), tag));
+    fz.push(format!("fitskit_enc_{}_{}.fits.fz", std::process::id(), tag));
     let mut out = std::env::temp_dir();
-    out.push(format!("fits4_enc_{}_{}.fits", std::process::id(), tag));
+    out.push(format!("fitskit_enc_{}_{}.fits", std::process::id(), tag));
     let _ = std::fs::remove_file(&fz);
     let _ = std::fs::remove_file(&out);
-    fits.to_file(&fz).expect("write fits4 .fz");
+    fits.to_file(&fz).expect("write fitskit .fz");
 
     let status = std::process::Command::new("funpack")
         .arg("-O")
@@ -563,7 +563,7 @@ fn assert_funpack_reads_fits4(src_name: &str, opts: &CompressOptions, tag: &str)
         .arg(&fz)
         .status()
         .expect("run funpack");
-    assert!(status.success(), "{tag}: funpack failed on fits4 output");
+    assert!(status.success(), "{tag}: funpack failed on fitskit output");
 
     let recon = FitsFile::from_file(&out).expect("read funpack output");
     let recon_images: Vec<&ImageData> = recon
@@ -612,12 +612,12 @@ fn encode_rice_i16_internal() {
 
 #[test]
 fn encode_rice_i16_interop_funpack() {
-    assert_funpack_reads_fits4("EUVEngc4151imgx.fits", &rice_opts(None), "rice_i16");
+    assert_funpack_reads_fitskit("EUVEngc4151imgx.fits", &rice_opts(None), "rice_i16");
 }
 
 #[test]
 fn encode_rice_i16_square_tiles_interop_funpack() {
-    assert_funpack_reads_fits4(
+    assert_funpack_reads_fitskit(
         "EUVEngc4151imgx.fits",
         &rice_opts(Some(vec![100, 100])),
         "rice_i16_t100",
@@ -632,7 +632,7 @@ fn encode_rice_i32_internal() {
 
 #[test]
 fn encode_rice_i32_interop_funpack() {
-    assert_funpack_reads_fits4("FGSf64y0106m_a1f.fits", &rice_opts(None), "rice_i32");
+    assert_funpack_reads_fitskit("FGSf64y0106m_a1f.fits", &rice_opts(None), "rice_i32");
 }
 
 #[cfg(feature = "gzip")]
@@ -655,7 +655,7 @@ fn encode_gzip1_i16_interop_funpack() {
         algorithm: CompressionType::Gzip1,
         ..Default::default()
     };
-    assert_funpack_reads_fits4("EUVEngc4151imgx.fits", &opts, "gzip1_i16");
+    assert_funpack_reads_fitskit("EUVEngc4151imgx.fits", &opts, "gzip1_i16");
 }
 
 #[cfg(feature = "gzip")]
@@ -665,7 +665,7 @@ fn encode_gzip2_i16_interop_funpack() {
         algorithm: CompressionType::Gzip2,
         ..Default::default()
     };
-    assert_funpack_reads_fits4("EUVEngc4151imgx.fits", &opts, "gzip2_i16");
+    assert_funpack_reads_fitskit("EUVEngc4151imgx.fits", &opts, "gzip2_i16");
 }
 
 #[cfg(feature = "gzip")]
@@ -688,12 +688,12 @@ fn encode_gzip_lossless_float_interop_funpack() {
         quantize: None,
         ..Default::default()
     };
-    assert_funpack_reads_fits4("FOCx38i0101t_c0f.fits", &opts, "gzip_lossless_f32");
+    assert_funpack_reads_fitskit("FOCx38i0101t_c0f.fits", &opts, "gzip_lossless_f32");
 }
 
 /// Lossy quantized-float RICE encode: round-trips within quantization tolerance via the
 /// internal decoder. (Interop byte-exactness is not expected for lossy data; the
-/// lossless cases above carry the funpack-reads-fits4 proof.)
+/// lossless cases above carry the funpack-reads-fitskit proof.)
 #[test]
 fn encode_rice_float_quantize_within_tolerance() {
     require_samples!();
