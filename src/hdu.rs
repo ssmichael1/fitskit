@@ -199,6 +199,16 @@ impl Hdu {
         self.write_impl(writer, true)
     }
 
+    /// Serialize this HDU's data payload to its on-disk (unpadded) bytes.
+    fn data_bytes(&self) -> Vec<u8> {
+        match &self.data {
+            HduData::Empty => Vec::new(),
+            HduData::Image(img) => img.pixels.to_bytes(),
+            HduData::AsciiTable(table) => table.raw_data.clone(),
+            HduData::BinTable(table) => table.to_bytes(),
+        }
+    }
+
     fn write_impl<W: Write>(&self, writer: &mut W, with_checksum: bool) -> Result<()> {
         let mut header = self.header.clone();
 
@@ -209,12 +219,7 @@ impl Hdu {
             HduData::BinTable(table) => table.fill_header(&mut header),
         }
 
-        let data_bytes = match &self.data {
-            HduData::Empty => Vec::new(),
-            HduData::Image(img) => img.pixels.to_bytes(),
-            HduData::AsciiTable(table) => table.raw_data.clone(),
-            HduData::BinTable(table) => table.to_bytes(),
-        };
+        let data_bytes = self.data_bytes();
 
         let padded_data = io_utils::pad_to_block(&data_bytes);
 
@@ -232,12 +237,7 @@ impl Hdu {
 
     /// Verify the DATASUM of this HDU (if the keyword is present).
     pub fn verify_datasum(&self) -> Result<()> {
-        let data_bytes = match &self.data {
-            HduData::Empty => Vec::new(),
-            HduData::Image(img) => img.pixels.to_bytes(),
-            HduData::AsciiTable(table) => table.raw_data.clone(),
-            HduData::BinTable(table) => table.to_bytes(),
-        };
+        let data_bytes = self.data_bytes();
         let padded = io_utils::pad_to_block(&data_bytes);
         checksum::verify_from_header(&self.header, &padded)
     }

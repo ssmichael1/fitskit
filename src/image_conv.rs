@@ -81,33 +81,24 @@ impl ImageData {
                     0.0,
                 ))
             }
-            DynamicImage::ImageLuma16(gray16) => {
-                let (w, h) = gray16.dimensions();
-                let pixels: Vec<i16> = gray16
-                    .as_raw()
-                    .iter()
-                    .map(|&v| (v as i32 - 32768) as i16)
-                    .collect();
-                Ok((
-                    ImageData::new(vec![w as usize, h as usize], PixelData::I16(pixels)),
-                    1.0,
-                    32768.0,
-                ))
-            }
-            other => {
-                let gray16 = other.to_luma16();
-                let (w, h) = gray16.dimensions();
-                let pixels: Vec<i16> = gray16
-                    .as_raw()
-                    .iter()
-                    .map(|&v| (v as i32 - 32768) as i16)
-                    .collect();
-                Ok((
-                    ImageData::new(vec![w as usize, h as usize], PixelData::I16(pixels)),
-                    1.0,
-                    32768.0,
-                ))
-            }
+            DynamicImage::ImageLuma16(gray16) => Ok(luma16_to_image(gray16)),
+            other => Ok(luma16_to_image(&other.to_luma16())),
         }
     }
+}
+
+/// Convert a 16-bit grayscale image to `ImageData` using the unsigned-16 FITS
+/// convention (`BZERO=32768`). Returns `(image_data, bscale, bzero)`.
+fn luma16_to_image(gray16: &Gray16Image) -> (ImageData, f64, f64) {
+    let (w, h) = gray16.dimensions();
+    let pixels: Vec<i16> = gray16
+        .as_raw()
+        .iter()
+        .map(|&v| (v as i32 - 32768) as i16)
+        .collect();
+    (
+        ImageData::new(vec![w as usize, h as usize], PixelData::I16(pixels)),
+        1.0,
+        32768.0,
+    )
 }

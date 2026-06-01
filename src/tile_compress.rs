@@ -531,10 +531,7 @@ impl<'a> CompressedImage<'a> {
             if dithered {
                 nextrand += 1;
                 if nextrand == N_RANDOM {
-                    iseed += 1;
-                    if iseed == N_RANDOM {
-                        iseed = 0;
-                    }
+                    iseed = (iseed + 1) % N_RANDOM;
                     nextrand = (fits_rand_value(iseed) * 500.0) as usize;
                 }
             }
@@ -635,14 +632,7 @@ impl<'a> CompressedImage<'a> {
     /// Tile dimensions at tile-grid coordinates `coords`, accounting for edge tiles
     /// that are truncated when `ZNAXISn` is not a multiple of `ZTILEn`.
     fn tile_dims_at(&self, coords: &[usize]) -> Vec<usize> {
-        let mut dims = Vec::with_capacity(coords.len());
-        for (axis, &c) in coords.iter().enumerate() {
-            let n = self.geometry.znaxis[axis];
-            let t = self.geometry.ztile[axis].max(1);
-            let start = c * t;
-            dims.push((n - start).min(t));
-        }
-        dims
+        tile_dims_at(&self.geometry.znaxis, &self.geometry.ztile, coords)
     }
 
     /// Decode one tile's bytes into a flat array of `tile_npix` integer values
@@ -1383,13 +1373,13 @@ fn integer_samples(image: &crate::image_data::ImageData) -> Result<(Vec<i64>, us
 }
 
 /// Gather one tile's flat samples (axis-1 fastest) from the full image buffer.
-fn gather_tile(
-    full: &[i64],
+fn gather_tile<T: Copy>(
+    full: &[T],
     image_dims: &[usize],
     ztile: &[usize],
     tile_dims: &[usize],
     coords: &[usize],
-) -> Vec<i64> {
+) -> Vec<T> {
     let ndim = image_dims.len();
     let mut img_stride = vec![1usize; ndim];
     for axis in 1..ndim {
@@ -1744,7 +1734,7 @@ fn compress_float_image(
             for tile_index in 0..num_tiles {
                 let coords = unravel(tile_index, &tiles_per_axis);
                 let tdims = tile_dims_at(&image.axes, ztile, &coords);
-                let tile = gather_tile_f64(&floats, &image.axes, ztile, &tdims, &coords);
+                let tile = gather_tile(&floats, &image.axes, ztile, &tdims, &coords);
                 // Raw big-endian floats, GZIP_1 (no shuffle) — read back by the decoder's
                 // unquantized-tile fallback path.
                 let mut raw = Vec::with_capacity(tile.len() * if is_f64 { 8 } else { 4 });
@@ -1787,7 +1777,7 @@ fn compress_float_image(
     for tile_index in 0..num_tiles {
         let coords = unravel(tile_index, &tiles_per_axis);
         let tdims = tile_dims_at(&image.axes, ztile, &coords);
-        let tile = gather_tile_f64(&floats, &image.axes, ztile, &tdims, &coords);
+        let tile = gather_tile(&floats, &image.axes, ztile, &tdims, &coords);
 
         let (scale, zero) = choose_scale_zero(&tile, q);
         let q_ints = quantize_tile(&tile, scale, zero, dither, zdither0, tile_index);
@@ -1824,42 +1814,6 @@ fn compress_float_image(
 }
 
 /// Gather one tile's flat floats (axis-1 fastest) from the full image buffer.
-fn gather_tile_f64(
-    full: &[f64],
-    image_dims: &[usize],
-    ztile: &[usize],
-    tile_dims: &[usize],
-    coords: &[usize],
-) -> Vec<f64> {
-    let ndim = image_dims.len();
-    let mut img_stride = vec![1usize; ndim];
-    for axis in 1..ndim {
-        img_stride[axis] = img_stride[axis - 1] * image_dims[axis - 1];
-    }
-    let mut origin = 0usize;
-    for axis in 0..ndim {
-        origin += coords[axis] * ztile[axis].max(1) * img_stride[axis];
-    }
-    let tile_npix: usize = tile_dims.iter().product();
-    let mut out = Vec::with_capacity(tile_npix);
-    let mut tcoord = vec![0usize; ndim];
-    for _ in 0..tile_npix {
-        let mut src = origin;
-        for axis in 0..ndim {
-            src += tcoord[axis] * img_stride[axis];
-        }
-        out.push(full[src]);
-        for axis in 0..ndim {
-            tcoord[axis] += 1;
-            if tcoord[axis] < tile_dims[axis] {
-                break;
-            }
-            tcoord[axis] = 0;
-        }
-    }
-    out
-}
-
 /// Choose a per-tile linear quantization `(scale, zero)` for float values.
 ///
 /// We do not replicate cfitsio's noise-based heuristic; any scale that round-trips
@@ -1940,10 +1894,7 @@ fn quantize_tile(
         if dithered {
             nextrand += 1;
             if nextrand == N_RANDOM {
-                iseed += 1;
-                if iseed == N_RANDOM {
-                    iseed = 0;
-                }
+                iseed = (iseed + 1) % N_RANDOM;
                 nextrand = (fits_rand_value(iseed) * 500.0) as usize;
             }
         }

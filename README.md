@@ -22,7 +22,7 @@ fitskit reads *and* writes the full FITS v4.0 standard — primary and extension
 
 ```toml
 [dependencies]
-fitskit = "0.1"
+fitskit = "0.2"
 ```
 
 ## Usage
@@ -134,6 +134,28 @@ let hdu = img.compress(&CompressOptions::default())?;
 let mut fits = FitsFile::with_empty_primary();
 fits.push_extension(hdu);
 fits.to_file("compressed.fits")?;
+# Ok::<(), fitskit::Error>(())
+```
+
+> **`gzip` feature:** the `GZIP_1`/`GZIP_2` algorithms (e.g. `CompressOptions { algorithm: CompressionType::Gzip1, .. }` when writing, or decoding a GZIP-compressed tile on read) require the `gzip` feature; `RICE_1` works without it. Build with `--features gzip` or `fitskit = { version = "0.2", features = ["gzip"] }`.
+
+### Converting to/from the `image` crate (feature `image`)
+
+With the `image` feature, `ImageData` converts to and from the [`image`](https://crates.io/crates/image) crate's `DynamicImage` — e.g. to save a FITS image as a PNG, or to ingest a raster as FITS. Build with `fitskit = { version = "0.2", features = ["image"] }`.
+
+```rust
+use fitskit::{FitsFile, HduData, ImageData};
+
+let fits = FitsFile::from_file("image.fits")?;
+if let HduData::Image(img) = &fits.primary().data {
+    // FITS → image crate (BSCALE/BZERO applied; 1.0/0.0 = identity)
+    let dynamic = img.to_dynamic_image(1.0, 0.0)?;
+    dynamic.save("image.png").unwrap();
+
+    // image crate → FITS, returning (ImageData, bscale, bzero)
+    let (restored, _bscale, _bzero) = ImageData::from_dynamic_image(&dynamic)?;
+    assert_eq!(restored.axes, img.axes);
+}
 # Ok::<(), fitskit::Error>(())
 ```
 

@@ -116,6 +116,11 @@
 //! assert!(matches!(restored.pixels, PixelData::I16(ref v) if *v == pixels));
 //! ```
 //!
+//! `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` work in the default build. The `GZIP_1`/
+//! `GZIP_2` algorithms (selected via `CompressOptions { algorithm:
+//! CompressionType::Gzip1, .. }`, or encountered when decoding a GZIP-compressed
+//! tile) require the `gzip` feature.
+//!
 //! ## BSCALE/BZERO
 //!
 //! Physical values are computed as `BZERO + BSCALE * array_value`. The unsigned
@@ -163,6 +168,27 @@
 //! - [`CompressedImage`] / [`CompressionType`] / [`CompressOptions`] — tile-compression
 //!   read view and write options.
 //! - [`Bitpix`] — the `BITPIX` data type; [`Error`] / [`Result`] — error handling.
+//!
+//! ## Image-crate interop (feature `image`)
+//!
+//! With the `image` feature, [`ImageData`] converts to and from the
+//! [`image`](https://crates.io/crates/image) crate's `DynamicImage` — e.g. to
+//! save a FITS image as a PNG, or to ingest a raster as FITS.
+//!
+//! ```no_run
+//! # #[cfg(feature = "image")] {
+//! use fitskit::{FitsFile, HduData, ImageData};
+//!
+//! let fits = FitsFile::from_file("image.fits").unwrap();
+//! if let HduData::Image(img) = &fits.primary().data {
+//!     // FITS -> image crate (BSCALE/BZERO applied; 1.0/0.0 = identity)
+//!     let dynamic = img.to_dynamic_image(1.0, 0.0).unwrap();
+//!     // image crate -> FITS, returning (ImageData, bscale, bzero)
+//!     let (restored, _bscale, _bzero) = ImageData::from_dynamic_image(&dynamic).unwrap();
+//!     assert_eq!(restored.axes, img.axes);
+//! }
+//! # }
+//! ```
 //!
 //! ## World Coordinate System (WCS)
 //!
