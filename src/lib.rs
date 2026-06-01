@@ -164,6 +164,32 @@
 //!   read view and write options.
 //! - [`Bitpix`] — the `BITPIX` data type; [`Error`] / [`Result`] — error handling.
 //!
+//! ## World Coordinate System (WCS)
+//!
+//! With the `wcs` feature, parse the celestial WCS from a header and map between
+//! 1-based FITS pixel coordinates and world coordinates (degrees). The spherical
+//! projection math is backed by the zero-dependency
+//! [`mapproj`](https://crates.io/crates/mapproj) crate.
+//!
+//! ```no_run
+//! # #[cfg(feature = "wcs")] {
+//! use fitskit::FitsFile;
+//!
+//! let fits = FitsFile::from_file("image.fits").unwrap();
+//! let wcs = fits.primary().header.wcs().unwrap();
+//!
+//! // Pixel (1-based) -> world (lon, lat) in degrees
+//! let (ra, dec) = wcs.pixel_to_world(256.5, 256.5).unwrap();
+//!
+//! // ...and back
+//! let (x, y) = wcs.world_to_pixel(ra, dec).unwrap();
+//! # }
+//! ```
+//!
+//! Only the common two-axis celestial case (e.g. `RA---TAN`/`DEC--TAN`) is
+//! supported; SIP distortions and 3+-axis/spectral WCS are out of scope. See the
+//! [`wcs`] module docs for details.
+//!
 //! ## Feature flags
 //!
 //! - **`image`** — enables conversion between [`ImageData`] and the
@@ -172,6 +198,10 @@
 //!   images via the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide)
 //!   crate. The default build stays dependency-free; `RICE_1` (read and write),
 //!   `PLIO_1`, and `HCOMPRESS_1` decoding all work without this feature.
+//! - **`wcs`** — enables two-axis celestial World Coordinate System pixel <-> world
+//!   transforms ([`Wcs`], [`Header::wcs`](header::Header::wcs)) backed by the
+//!   zero-dependency [`mapproj`](https://crates.io/crates/mapproj) crate. The default
+//!   build stays dependency-free.
 
 pub mod ascii_table;
 pub mod bintable;
@@ -189,6 +219,9 @@ pub mod types;
 #[cfg(feature = "image")]
 pub mod image_conv;
 
+#[cfg(feature = "wcs")]
+pub mod wcs;
+
 pub use ascii_table::AsciiTable;
 pub use bintable::{BinCellValue, BinColumn, BinColumnType, BinTable, BinTableBuilder};
 pub use error::{Error, Result};
@@ -201,3 +234,6 @@ pub use tile_compress::{
     compress_image, CompressOptions, CompressedImage, CompressionType, Quantize, TileGeometry,
 };
 pub use types::Bitpix;
+
+#[cfg(feature = "wcs")]
+pub use wcs::Wcs;

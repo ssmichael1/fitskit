@@ -30,6 +30,7 @@ Zero external dependencies for core functionality. Optional `image` crate behind
 | `hdu.rs` | `Hdu` struct, `HduData` enum (Empty/Image/AsciiTable/BinTable); `as_compressed_image()` accessor |
 | `fits.rs` | `FitsFile`: top-level read/write, HDU iteration, builder API |
 | `image_conv.rs` | (feature="image") `DynamicImage` <-> `ImageData` conversion |
+| `wcs.rs` | (feature="wcs") `Wcs`: two-axis celestial WCS pixel <-> world transforms, parsed from a `Header` (`Header::wcs`/`Hdu::wcs`). Backed by the `mapproj` crate. CTYPE projection code -> `mapproj` projection; CD or PC+CDELT linear transform; 1-based pixels, degrees |
 
 ### Key Types
 
@@ -66,9 +67,10 @@ NASA sample FITS files in `samp/`:
 
 ## Design Decisions
 
-- **No external dependencies** for core — no `byteorder`, no `thiserror`. Only optional, feature-gated deps: `image` and `gzip` (`miniz_oxide`)
+- **No external dependencies** for core — no `byteorder`, no `thiserror`. Only optional, feature-gated deps: `image`, `gzip` (`miniz_oxide`), and `wcs` (`mapproj`, itself zero-dep)
 - **Random groups** skipped (deprecated per standard)
 - BSCALE/BZERO: raw vs scaled access modes on `ImageData`
 - Unsigned integer convention: BZERO offset (32768 for u16, etc.)
 - **Tile compression**: decode (read) for RICE_1/PLIO_1/HCOMPRESS_1 in the zero-dep core, GZIP_1/2 behind the `gzip` feature. Lazy `hdu.as_compressed_image()?.decompress()?`; `HduData` stays `BinTable` so the compressed tiles survive for lossless round-trip. Float decode reproduces cfitsio's fused multiply-add to stay bit-exact vs `funpack` (see memory). Encode (write) via `image.compress(&CompressOptions{..})? -> Hdu` (then `fits.push_extension(..)`): RICE_1 (int lossless + quantized/dithered float lossy) and GZIP_1/2 (int lossless; lossless raw-float storage via GZIP_1). Encoders are byte-exact inverses of the decoders and emit `funpack`-readable FITS. **Z\* keyword order is load-bearing**: `funpack` rebuilds the image header by walking cards, so `ZTENSION` must precede `ZBITPIX`/`ZNAXIS` (else "1st key not SIMPLE or XTENSION"); `build_z_header` emits fpack's order. PLIO_1/HCOMPRESS_1 encode and HCOMPRESS `SMOOTH≠0` are not implemented
 - **Compressed fixtures**: `scripts/gen_compressed_fixtures.sh` builds fpack `.fz` test files into `samp/` (gitignored, served from GCS bucket `fits4_samples`); compression tests skip when fixtures/`funpack` are absent
+- **WCS** (`wcs` feature, `wcs.rs`): `mapproj`-backed, feature-gated so the default build stays zero-dep. Scope is the **2-axis celestial** linear + projection case only. `Wcs::from_header` parses `CTYPEn` (3-letter code mapped to a `mapproj` projection; unknown -> `Error::UnsupportedWcs`), `CRVALn`/`CRPIXn`, and the linear transform from `CDi_j` (precedence) or `PCi_j` + `CDELTi`; `CUNITn` must be `deg`. Pixels are **1-based** (FITS `CRPIX`) and world coords **degrees** at the API boundary; mapproj wants radians and converts the CD matrix to radians internally, so `pixel_to_world` passes 1-based pixels straight through and converts the returned radian `LonLat` to degrees. **`world_to_pixel` does NOT use `mapproj`'s `Img2Celestial::lonlat2img`**: mapproj 0.4.0's `WcsImgXY2ProjXY::inverse` transposes the off-diagonal terms of the inverse CD matrix (only correct for diagonal CD), so we project to the plane via `CenteredProjection::proj_lonlat` and apply our own correct inverse CD. Validated against `astropy.wcs` (<1e-6 deg) on the TAN sample HDUs. **Out of scope**: SIP distortions (`-SIP`/`A_p_q`), 3+-axis / spectral WCS, `PVi_m` projection params, non-degree `CUNIT` — all rejected or ignored, none attempted. Caveat: in debug builds, `world_to_pixel` at the *exact* `CRVAL` can trip a mapproj `debug_assert!` on the rotated center unit vector (release builds fine)

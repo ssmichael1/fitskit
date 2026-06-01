@@ -23,9 +23,14 @@ default-features = false
 version = "0.8"
 optional = true
 
+[dependencies.mapproj]
+version = "0.4"
+optional = true
+
 [features]
 image = ["dep:image"]
 gzip = ["dep:miniz_oxide"]
+wcs = ["dep:mapproj"]
 
 [profile.test]
 opt-level = 3

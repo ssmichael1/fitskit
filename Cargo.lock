@@ -31,6 +31,7 @@ name = "fitskit"
 version = "0.1.0"
 dependencies = [
  "image",
+ "mapproj",
  "miniz_oxide",
 ]
 
@@ -45,6 +46,12 @@ dependencies = [
  "moxcms",
  "num-traits",
 ]
+
+[[package]]
+name = "mapproj"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cef28b23f82a86b32a30cfbd8e45fb66645bd677b150636ae277ac9295054c44"
 
 [[package]]
 name = "miniz_oxide"
