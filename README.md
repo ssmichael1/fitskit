@@ -22,7 +22,7 @@ fitskit reads *and* writes the full FITS v4.0 standard — primary and extension
 
 ```toml
 [dependencies]
-fitskit = "0.1"
+fitskit = "0.2"
 ```
 
 ## Usage
