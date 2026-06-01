@@ -168,7 +168,7 @@ impl AsciiTable {
         let column = &self.columns[col];
 
         // Handle Fortran D exponent
-        let s = raw.replace('D', "E").replace('d', "e");
+        let s = crate::keyword::fortran_exp(raw);
         let val: f64 = s
             .parse()
             .map_err(|_| Error::InvalidTableFormat(format!("cannot parse float: '{raw}'")))?;

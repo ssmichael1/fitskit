@@ -48,7 +48,7 @@ impl HeaderValue {
 impl fmt::Display for HeaderValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HeaderValue::Logical(b) => write!(f, "{}", if *b { "T" } else { "F" }),
+            HeaderValue::Logical(b) => write!(f, "{}", logical_str(*b)),
             HeaderValue::Integer(i) => write!(f, "{i}"),
             HeaderValue::Float(v) => write!(f, "{v}"),
             HeaderValue::String(s) => write!(f, "'{s}'"),
@@ -203,13 +203,7 @@ impl Keyword {
 
 fn format_value(value: &HeaderValue) -> String {
     match value {
-        HeaderValue::Logical(b) => {
-            if *b {
-                "T".to_string()
-            } else {
-                "F".to_string()
-            }
-        }
+        HeaderValue::Logical(b) => logical_str(*b).to_string(),
         HeaderValue::Integer(i) => format!("{i}"),
         HeaderValue::Float(f) => format_float(*f),
         HeaderValue::String(s) => format!("'{}'", pad_string_value(s)),
@@ -221,8 +215,21 @@ fn format_value(value: &HeaderValue) -> String {
 
 fn format_float(f: f64) -> String {
     // Use scientific notation with enough precision
-    let s = format!("{:.15E}", f);
-    s
+    format!("{:.15E}", f)
+}
+
+/// FITS logical value as its single-character card representation.
+fn logical_str(b: bool) -> &'static str {
+    if b {
+        "T"
+    } else {
+        "F"
+    }
+}
+
+/// Normalize FITS Fortran-style exponents (`D`/`d`) to Rust-parseable `E`/`e`.
+pub(crate) fn fortran_exp(s: &str) -> String {
+    s.replace('D', "E").replace('d', "e")
 }
 
 fn pad_string_value(s: &str) -> String {
@@ -380,7 +387,7 @@ fn parse_value_comment(s: &str) -> Result<(HeaderValue, Option<String>)> {
     }
 
     // Try float (handle D exponent notation)
-    let float_str = val_trimmed.replace('D', "E").replace('d', "e");
+    let float_str = fortran_exp(val_trimmed);
     if let Ok(f) = float_str.parse::<f64>() {
         return Ok((HeaderValue::Float(f), comment));
     }
@@ -426,11 +433,9 @@ fn parse_string_value(s: &str) -> Result<(HeaderValue, Option<String>)> {
     let value = value.trim_end().to_string();
 
     // Check for continuation marker (trailing &)
-    let continues = value.ends_with('&');
-    let value = if continues {
-        value[..value.len() - 1].to_string()
-    } else {
-        value
+    let value = match value.strip_suffix('&') {
+        Some(stripped) => stripped.to_string(),
+        None => value,
     };
 
     // Remaining after closing quote is potential comment
@@ -455,8 +460,8 @@ fn parse_complex_value(s: &str) -> Result<(HeaderValue, Option<String>)> {
     let rest = &s[close + 1..];
     let comment = parse_trailing_comment(rest);
 
-    let a_str = parts[0].trim().replace('D', "E").replace('d', "e");
-    let b_str = parts[1].trim().replace('D', "E").replace('d', "e");
+    let a_str = fortran_exp(parts[0].trim());
+    let b_str = fortran_exp(parts[1].trim());
 
     // Try integer complex first
     if let (Ok(a), Ok(b)) = (a_str.parse::<i64>(), b_str.parse::<i64>()) {

@@ -87,9 +87,7 @@ impl Header {
                     buf[start..start + RECORD_SIZE].try_into().unwrap();
 
                 // Check for END keyword
-                if &record[..8] == b"END     "
-                    || record[..3] == *b"END" && record[3..8].iter().all(|&b| b == b' ')
-                {
+                if record[..3] == *b"END" && record[3..8].iter().all(|&b| b == b' ') {
                     break 'outer;
                 }
 
@@ -133,9 +131,7 @@ impl Header {
         let remainder = cards.len() % RECORDS_PER_BLOCK;
         if remainder != 0 {
             let padding = RECORDS_PER_BLOCK - remainder;
-            for _ in 0..padding {
-                cards.push([b' '; RECORD_SIZE]);
-            }
+            cards.resize(cards.len() + padding, [b' '; RECORD_SIZE]);
         }
 
         // Write all cards

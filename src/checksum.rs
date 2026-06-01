@@ -24,7 +24,12 @@ pub fn checksum(data: &[u8]) -> u32 {
         lo += ((word[2] as u32) << 8) + word[3] as u32;
     }
 
-    // Fold carries
+    let (hi, lo) = fold_carries(hi, lo);
+    (hi << 16) | lo
+}
+
+/// Fold end-around carries from the hi/lo accumulators until both are 16-bit.
+fn fold_carries(mut hi: u32, mut lo: u32) -> (u32, u32) {
     loop {
         let hicarry = hi >> 16;
         let locarry = lo >> 16;
@@ -34,8 +39,7 @@ pub fn checksum(data: &[u8]) -> u32 {
         hi = (hi & 0xFFFF) + locarry;
         lo = (lo & 0xFFFF) + hicarry;
     }
-
-    (hi << 16) | lo
+    (hi, lo)
 }
 
 /// Accumulate a checksum: ones-complement add `new_data` checksum into `existing`.
@@ -46,19 +50,10 @@ pub fn checksum_accumulate(existing: u32, new_data: &[u8]) -> u32 {
 
 /// Ones-complement addition of two 32-bit values.
 fn ones_complement_add(a: u32, b: u32) -> u32 {
-    let mut hi = (a >> 16) + (b >> 16);
-    let mut lo = (a & 0xFFFF) + (b & 0xFFFF);
+    let hi = (a >> 16) + (b >> 16);
+    let lo = (a & 0xFFFF) + (b & 0xFFFF);
 
-    loop {
-        let hicarry = hi >> 16;
-        let locarry = lo >> 16;
-        if hicarry == 0 && locarry == 0 {
-            break;
-        }
-        hi = (hi & 0xFFFF) + locarry;
-        lo = (lo & 0xFFFF) + hicarry;
-    }
-
+    let (hi, lo) = fold_carries(hi, lo);
     (hi << 16) | lo
 }
 
@@ -139,14 +134,7 @@ pub fn decode_checksum(ascii: &str, complement: bool) -> u32 {
         lo += ((cbuf[i + 2] as u32) << 8) + cbuf[i + 3] as u32;
     }
 
-    let mut hicarry = hi >> 16;
-    let mut locarry = lo >> 16;
-    while hicarry != 0 || locarry != 0 {
-        hi = (hi & 0xFFFF) + locarry;
-        lo = (lo & 0xFFFF) + hicarry;
-        hicarry = hi >> 16;
-        locarry = lo >> 16;
-    }
+    let (hi, lo) = fold_carries(hi, lo);
 
     let sum = (hi << 16) | lo;
     if complement {
