@@ -16,6 +16,12 @@ pub enum Error {
     InvalidTableFormat(String),
     UnsupportedCompression(String),
     CompressionError(String),
+    /// A WCS header is malformed or incomplete (missing keyword, inconsistent
+    /// CTYPE, etc.). Only produced with the `wcs` feature.
+    Wcs(String),
+    /// A WCS feature is recognised but unsupported (SIP, unknown projection
+    /// code, non-degree units, etc.). Only produced with the `wcs` feature.
+    UnsupportedWcs(String),
 }
 
 impl fmt::Display for Error {
@@ -40,6 +46,8 @@ impl fmt::Display for Error {
             Error::InvalidTableFormat(s) => write!(f, "invalid table format: {s}"),
             Error::UnsupportedCompression(s) => write!(f, "unsupported compression: {s}"),
             Error::CompressionError(s) => write!(f, "compression error: {s}"),
+            Error::Wcs(s) => write!(f, "invalid WCS: {s}"),
+            Error::UnsupportedWcs(s) => write!(f, "unsupported WCS: {s}"),
         }
     }
 }

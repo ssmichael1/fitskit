@@ -154,6 +154,33 @@ fits2.primary().verify_datasum()?;
 # Ok::<(), fitskit::Error>(())
 ```
 
+### World Coordinate System (WCS)
+
+With the `wcs` feature, parse a two-axis celestial WCS straight from a header and
+map between **1-based FITS pixel** coordinates and **world coordinates in
+degrees**. The spherical-projection math is backed by the zero-dependency
+[`mapproj`](https://crates.io/crates/mapproj) crate.
+
+```rust,no_run
+use fitskit::FitsFile;
+
+let fits = FitsFile::from_file("image.fits")?;
+let wcs = fits.primary().header.wcs()?;
+
+// Pixel (1-based) -> world (lon, lat) in degrees
+let (ra, dec) = wcs.pixel_to_world(256.5, 256.5).unwrap();
+
+// ...and back to pixel
+let (x, y) = wcs.world_to_pixel(ra, dec).unwrap();
+# Ok::<(), fitskit::Error>(())
+```
+
+Supported: the common 2-axis celestial case — `CTYPEn = xxx--CCC` for any
+projection `mapproj` implements (`TAN`, `SIN`, `ARC`, `ZEA`, `STG`, `AIT`, `MER`,
+`CAR`, `CEA`, `SFL`, `MOL`, conics, …), with the linear transform from `CDi_j` or
+`PCi_j` + `CDELTi` (CD takes precedence). SIP distortions and 3+-axis / spectral
+WCS are out of scope.
+
 ## Core types
 
 A FITS file is an ordered sequence of **Header-Data Units (HDUs)**. fitskit mirrors
@@ -185,6 +212,7 @@ are preserved for a lossless round-trip write.
 | *(none)* | ✓ | Core read/write, all HDU types, RICE_1 / PLIO_1 / HCOMPRESS_1 decompression, and RICE_1 compression — zero dependencies |
 | `image` | | Conversion between `ImageData` and the [`image`](https://crates.io/crates/image) crate's `DynamicImage` |
 | `gzip` | | `GZIP_1`/`GZIP_2` tile compression and decompression via the pure-Rust [`miniz_oxide`](https://crates.io/crates/miniz_oxide) crate |
+| `wcs` | | Two-axis celestial World Coordinate System pixel ⇄ world transforms (`Wcs`, `Header::wcs`) via the zero-dependency [`mapproj`](https://crates.io/crates/mapproj) crate |
 
 The default build stays dependency-free; `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` decompression and `RICE_1` compression all work without any feature (only `GZIP_1`/`GZIP_2` need the `gzip` feature).
 
@@ -214,12 +242,17 @@ Among Rust FITS crates, fitskit fills a specific niche — **pure Rust, zero def
 - Tile-compressed image **writing**: RICE_1 and GZIP_1/GZIP_2 — integer
   (lossless) and float (lossless via GZIP, or lossy quantized + dithered);
   output verified byte-exact through cfitsio's `funpack`
+- Two-axis celestial WCS pixel ⇄ world transforms (`wcs` feature) for the common
+  `CTYPEn = xxx--CCC` case, linear transform from `CDi_j` or `PCi_j` + `CDELTi`
 
 **Not supported**
 
 - Encoding `PLIO_1` or `HCOMPRESS_1` (these decode only)
 - HCOMPRESS image smoothing (`SMOOTH` ≠ 0) on decode
 - Random groups (deprecated in FITS v4.0)
+- WCS: SIP distortions, 3+-axis / spectral WCS, `PVi_m` projection parameters,
+  and non-degree `CUNIT` (the `wcs` feature handles the 2-axis celestial linear
+  + projection case only)
 
 ## License
 
