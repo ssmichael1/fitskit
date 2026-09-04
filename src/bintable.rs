@@ -181,6 +181,13 @@ pub struct BinTable {
 impl BinTable {
     /// Read from header and raw data (including heap).
     pub fn from_header_and_data(header: &Header, data: &[u8]) -> Result<Self> {
+        Self::from_header_and_vec(header, data.to_vec())
+    }
+
+    /// Read from header and an owned raw data buffer (main table followed by
+    /// heap). The buffer is reused as the main-table storage, so no copy of
+    /// the table body is made.
+    pub fn from_header_and_vec(header: &Header, mut data: Vec<u8>) -> Result<Self> {
         let nrows = header.require_int("NAXIS2")? as usize;
         let row_len = header.require_int("NAXIS1")? as usize;
         let tfields = header.require_int("TFIELDS")? as usize;
@@ -194,12 +201,15 @@ impl BinTable {
             });
         }
 
-        let main_data = data[..main_size].to_vec();
         let heap = if pcount > 0 && data.len() >= main_size + pcount {
-            data[main_size..main_size + pcount].to_vec()
+            let mut heap = data.split_off(main_size);
+            heap.truncate(pcount);
+            heap
         } else {
+            data.truncate(main_size);
             Vec::new()
         };
+        let main_data = data;
 
         let mut columns = Vec::with_capacity(tfields);
         for i in 1..=tfields {
@@ -276,26 +286,23 @@ impl BinTable {
             BinColumnType::Bit(n) => Ok(BinCellValue::Bits(bytes.to_vec(), *n)),
             BinColumnType::Byte(n) => Ok(BinCellValue::Bytes(bytes[..*n].to_vec())),
             BinColumnType::I16(n) => {
-                let vals: Vec<i16> = bytes
-                    .chunks_exact(2)
-                    .take(*n)
-                    .map(|c| i16::from_be_bytes([c[0], c[1]]))
+                let vals: Vec<i16> = bytes.as_chunks::<2>().0[..*n]
+                    .iter()
+                    .map(|&c| i16::from_be_bytes(c))
                     .collect();
                 Ok(BinCellValue::I16(vals))
             }
             BinColumnType::J32(n) => {
-                let vals: Vec<i32> = bytes
-                    .chunks_exact(4)
-                    .take(*n)
-                    .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                let vals: Vec<i32> = bytes.as_chunks::<4>().0[..*n]
+                    .iter()
+                    .map(|&c| i32::from_be_bytes(c))
                     .collect();
                 Ok(BinCellValue::I32(vals))
             }
             BinColumnType::K64(n) => {
-                let vals: Vec<i64> = bytes
-                    .chunks_exact(8)
-                    .take(*n)
-                    .map(|c| i64::from_be_bytes(c.try_into().unwrap()))
+                let vals: Vec<i64> = bytes.as_chunks::<8>().0[..*n]
+                    .iter()
+                    .map(|&c| i64::from_be_bytes(c))
                     .collect();
                 Ok(BinCellValue::I64(vals))
             }
@@ -307,25 +314,22 @@ impl BinTable {
                 Ok(BinCellValue::String(s))
             }
             BinColumnType::E32(n) => {
-                let vals: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .take(*n)
-                    .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                let vals: Vec<f32> = bytes.as_chunks::<4>().0[..*n]
+                    .iter()
+                    .map(|&c| f32::from_be_bytes(c))
                     .collect();
                 Ok(BinCellValue::F32(vals))
             }
             BinColumnType::D64(n) => {
-                let vals: Vec<f64> = bytes
-                    .chunks_exact(8)
-                    .take(*n)
-                    .map(|c| f64::from_be_bytes(c.try_into().unwrap()))
+                let vals: Vec<f64> = bytes.as_chunks::<8>().0[..*n]
+                    .iter()
+                    .map(|&c| f64::from_be_bytes(c))
                     .collect();
                 Ok(BinCellValue::F64(vals))
             }
             BinColumnType::C64(n) => {
-                let vals: Vec<(f32, f32)> = bytes
-                    .chunks_exact(8)
-                    .take(*n)
+                let vals: Vec<(f32, f32)> = bytes.as_chunks::<8>().0[..*n]
+                    .iter()
                     .map(|c| {
                         let r = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
                         let i = f32::from_be_bytes([c[4], c[5], c[6], c[7]]);
@@ -335,9 +339,8 @@ impl BinTable {
                 Ok(BinCellValue::ComplexF32(vals))
             }
             BinColumnType::M128(n) => {
-                let vals: Vec<(f64, f64)> = bytes
-                    .chunks_exact(16)
-                    .take(*n)
+                let vals: Vec<(f64, f64)> = bytes.as_chunks::<16>().0[..*n]
+                    .iter()
                     .map(|c| {
                         let r = f64::from_be_bytes(c[..8].try_into().unwrap());
                         let i = f64::from_be_bytes(c[8..16].try_into().unwrap());
@@ -421,28 +424,38 @@ impl BinTable {
                 Ok(BinCellValue::String(s))
             }
             'I' => Ok(BinCellValue::I16(
-                data.chunks_exact(2)
-                    .map(|c| i16::from_be_bytes([c[0], c[1]]))
+                data.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&c| i16::from_be_bytes(c))
                     .collect(),
             )),
             'J' => Ok(BinCellValue::I32(
-                data.chunks_exact(4)
-                    .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| i32::from_be_bytes(c))
                     .collect(),
             )),
             'K' => Ok(BinCellValue::I64(
-                data.chunks_exact(8)
-                    .map(|c| i64::from_be_bytes(c.try_into().unwrap()))
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|&c| i64::from_be_bytes(c))
                     .collect(),
             )),
             'E' => Ok(BinCellValue::F32(
-                data.chunks_exact(4)
-                    .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| f32::from_be_bytes(c))
                     .collect(),
             )),
             'D' => Ok(BinCellValue::F64(
-                data.chunks_exact(8)
-                    .map(|c| f64::from_be_bytes(c.try_into().unwrap()))
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|&c| f64::from_be_bytes(c))
                     .collect(),
             )),
             _ => Err(Error::InvalidTableFormat(format!(

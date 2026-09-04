@@ -138,47 +138,42 @@ impl Hdu {
         // Determine HDU type
         let is_primary = header.find("SIMPLE").is_some();
         let xtension = header.get_string("XTENSION").map(|s| s.to_string());
+        let is_image = is_primary || xtension.as_deref() == Some("IMAGE");
 
         if data_bytes == 0 {
-            // Skip padding if any
-            io_utils::skip_data_block(reader, 0)?;
             return Ok(Hdu {
                 header,
                 data: HduData::Empty,
             });
         }
 
-        // For bintable, we need to read main data + heap (PCOUNT bytes)
+        // For extensions the data size is |BITPIX|/8 * GCOUNT * (PCOUNT + product(NAXISn)).
+        // For BINTABLE (BITPIX=8, GCOUNT=1) that is main table + heap; for a
+        // plain image PCOUNT is 0.
         let pcount = header.get_int("PCOUNT").unwrap_or(0) as usize;
-        // data_byte_count already includes PCOUNT for extensions with the formula:
-        // |BITPIX|/8 * GCOUNT * (PCOUNT + product(NAXISn))
-        // But for BINTABLE, PCOUNT is heap size, separate from main table.
-        // The standard formula: data_bytes = NAXIS1 * NAXIS2 (main) + PCOUNT (heap) for BINTABLE
-        // Actually the standard formula is: |BITPIX|/8 * GCOUNT * (PCOUNT + NAXIS1*NAXIS2)
-        // For BINTABLE: BITPIX=8, GCOUNT=1, so total = PCOUNT + NAXIS1*NAXIS2
-        // data_byte_count() already computes this correctly.
+
+        if is_image && pcount == 0 {
+            // Fast path: decode pixels straight from the reader (no raw copy),
+            // then step over the block padding.
+            let img = ImageData::read_from(&header, reader)?;
+            io_utils::skip_padding(reader, data_bytes)?;
+            return Ok(Hdu {
+                header,
+                data: HduData::Image(img),
+            });
+        }
 
         let raw = io_utils::read_data_block(reader, data_bytes)?;
 
-        let data = if is_primary || xtension.as_deref() == Some("IMAGE") {
-            // Image data — exclude pcount bytes (should be 0 for images)
-            let naxis = header.get_int("NAXIS").unwrap_or(0) as usize;
-            if naxis == 0 {
-                HduData::Empty
-            } else {
-                let image_bytes = if pcount > 0 {
-                    &raw[..raw.len() - pcount]
-                } else {
-                    &raw
-                };
-                let img = ImageData::from_header_and_data(&header, image_bytes)?;
-                HduData::Image(img)
-            }
+        let data = if is_image {
+            // Image data — exclude pcount bytes
+            let img = ImageData::from_header_and_data(&header, &raw[..raw.len() - pcount])?;
+            HduData::Image(img)
         } else if xtension.as_deref() == Some("TABLE") {
-            let table = AsciiTable::from_header_and_data(&header, &raw)?;
+            let table = AsciiTable::from_header_and_vec(&header, raw)?;
             HduData::AsciiTable(table)
         } else if xtension.as_deref() == Some("BINTABLE") {
-            let table = BinTable::from_header_and_data(&header, &raw)?;
+            let table = BinTable::from_header_and_vec(&header, raw)?;
             HduData::BinTable(table)
         } else if let Some(ext) = &xtension {
             return Err(Error::UnsupportedExtension(ext.clone()));
@@ -199,14 +194,59 @@ impl Hdu {
         self.write_impl(writer, true)
     }
 
-    /// Serialize this HDU's data payload to its on-disk (unpadded) bytes.
-    fn data_bytes(&self) -> Vec<u8> {
+    /// Size of this HDU's data payload on disk, before block padding.
+    pub fn data_byte_len(&self) -> usize {
         match &self.data {
-            HduData::Empty => Vec::new(),
-            HduData::Image(img) => img.pixels.to_bytes(),
-            HduData::AsciiTable(table) => table.raw_data.clone(),
-            HduData::BinTable(table) => table.to_bytes(),
+            HduData::Empty => 0,
+            HduData::Image(img) => img.pixels.byte_len(),
+            HduData::AsciiTable(table) => table.raw_data.len(),
+            HduData::BinTable(table) => table.main_data.len() + table.heap.len(),
         }
+    }
+
+    /// Byte value used to pad this HDU's data unit to a block boundary:
+    /// ASCII blanks for ASCII tables, zeros otherwise (the FITS standard requires blank fill for ASCII tables).
+    fn fill_byte(&self) -> u8 {
+        match &self.data {
+            HduData::AsciiTable(_) => b' ',
+            _ => 0,
+        }
+    }
+
+    /// Visit this HDU's on-disk (unpadded) data bytes in bounded chunks,
+    /// without materializing a copy of the whole payload.
+    fn for_each_data_chunk<E>(
+        &self,
+        mut f: impl FnMut(&[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        match &self.data {
+            HduData::Empty => Ok(()),
+            HduData::Image(img) => img.pixels.for_each_be_chunk(f),
+            HduData::AsciiTable(table) => f(&table.raw_data),
+            HduData::BinTable(table) => {
+                f(&table.main_data)?;
+                f(&table.heap)
+            }
+        }
+    }
+
+    /// Compute the DATASUM of this HDU's block-padded data unit.
+    ///
+    /// Zero padding contributes nothing to the sum, so only the payload is
+    /// visited; the blank fill of ASCII tables is included explicitly.
+    pub fn datasum(&self) -> u32 {
+        let mut acc = checksum::Checksum::new();
+        let _ = self.for_each_data_chunk(|chunk| {
+            acc.update(chunk);
+            Ok::<(), std::convert::Infallible>(())
+        });
+        let fill = self.fill_byte();
+        if fill != 0 {
+            let len = self.data_byte_len();
+            let padding = io_utils::padded_size(len) - len;
+            acc.update(&[fill; crate::types::BLOCK_SIZE][..padding]);
+        }
+        acc.finish()
     }
 
     fn write_impl<W: Write>(&self, writer: &mut W, with_checksum: bool) -> Result<()> {
@@ -219,26 +259,24 @@ impl Hdu {
             HduData::BinTable(table) => table.fill_header(&mut header),
         }
 
-        let data_bytes = self.data_bytes();
-
-        let padded_data = io_utils::pad_to_block(&data_bytes);
-
         if with_checksum {
-            let header_bytes = checksum::stamp_hdu(&mut header, &padded_data)?;
+            let header_bytes = checksum::stamp_hdu_with_datasum(&mut header, self.datasum())?;
             writer.write_all(&header_bytes)?;
         } else {
             header.write_to(writer)?;
         }
 
-        io_utils::write_data_block(writer, &data_bytes)?;
+        self.for_each_data_chunk(|chunk| writer.write_all(chunk))?;
+        io_utils::write_padding(writer, self.data_byte_len(), self.fill_byte())?;
 
         Ok(())
     }
 
     /// Verify the DATASUM of this HDU (if the keyword is present).
     pub fn verify_datasum(&self) -> Result<()> {
-        let data_bytes = self.data_bytes();
-        let padded = io_utils::pad_to_block(&data_bytes);
-        checksum::verify_from_header(&self.header, &padded)
+        if self.header.find("DATASUM").is_none() {
+            return Ok(());
+        }
+        checksum::verify_datasum_value(&self.header, self.datasum())
     }
 }

@@ -18,8 +18,9 @@ impl Header {
 
     /// Find the first keyword with the given name.
     pub fn find(&self, name: &str) -> Option<&Keyword> {
-        let name_upper = name.to_uppercase();
-        self.keywords.iter().find(|k| k.name == name_upper)
+        self.keywords
+            .iter()
+            .find(|k| k.name.eq_ignore_ascii_case(name))
     }
 
     /// Get an integer value by keyword name.
@@ -50,8 +51,11 @@ impl Header {
 
     /// Set or update a keyword. If name exists, update in place; otherwise append.
     pub fn set(&mut self, name: &str, value: HeaderValue, comment: Option<&str>) {
-        let name_upper = name.to_uppercase();
-        if let Some(kw) = self.keywords.iter_mut().find(|k| k.name == name_upper) {
+        if let Some(kw) = self
+            .keywords
+            .iter_mut()
+            .find(|k| k.name.eq_ignore_ascii_case(name))
+        {
             kw.value = Some(value);
             if let Some(c) = comment {
                 kw.comment = Some(c.to_string());
@@ -114,31 +118,31 @@ impl Header {
         Ok(Header { keywords })
     }
 
-    /// Write the header as block-aligned 2880-byte blocks.
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
-        let mut cards: Vec<[u8; RECORD_SIZE]> = Vec::new();
+    /// Serialize the header to block-aligned bytes (a multiple of 2880).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity((self.keywords.len() + 1).div_ceil(RECORDS_PER_BLOCK) * BLOCK_SIZE);
 
         for kw in &self.keywords {
-            cards.extend(kw.to_cards());
+            for card in kw.to_cards() {
+                out.extend_from_slice(&card);
+            }
         }
 
         // Append END card
         let mut end_card = [b' '; RECORD_SIZE];
         end_card[..3].copy_from_slice(b"END");
-        cards.push(end_card);
+        out.extend_from_slice(&end_card);
 
-        // Pad to fill complete block
-        let remainder = cards.len() % RECORDS_PER_BLOCK;
-        if remainder != 0 {
-            let padding = RECORDS_PER_BLOCK - remainder;
-            cards.resize(cards.len() + padding, [b' '; RECORD_SIZE]);
-        }
+        // Pad with blank cards to fill the last block
+        let padded = out.len().div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
+        out.resize(padded, b' ');
+        out
+    }
 
-        // Write all cards
-        for card in &cards {
-            writer.write_all(card)?;
-        }
-
+    /// Write the header as block-aligned 2880-byte blocks.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(&self.to_bytes())?;
         Ok(())
     }
 

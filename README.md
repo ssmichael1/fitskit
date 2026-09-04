@@ -22,7 +22,7 @@ fitskit reads *and* writes the full FITS v4.0 standard — primary and extension
 
 ```toml
 [dependencies]
-fitskit = "0.2"
+fitskit = "0.3"
 ```
 
 ## Usage
@@ -137,11 +137,11 @@ fits.to_file("compressed.fits")?;
 # Ok::<(), fitskit::Error>(())
 ```
 
-> **`gzip` feature:** the `GZIP_1`/`GZIP_2` algorithms (e.g. `CompressOptions { algorithm: CompressionType::Gzip1, .. }` when writing, or decoding a GZIP-compressed tile on read) require the `gzip` feature; `RICE_1` works without it. Build with `--features gzip` or `fitskit = { version = "0.2", features = ["gzip"] }`.
+> **`gzip` feature:** the `GZIP_1`/`GZIP_2` algorithms (e.g. `CompressOptions { algorithm: CompressionType::Gzip1, .. }` when writing, or decoding a GZIP-compressed tile on read) require the `gzip` feature; `RICE_1` works without it. Build with `--features gzip` or `fitskit = { version = "0.3", features = ["gzip"] }`.
 
 ### Converting to/from the `image` crate (feature `image`)
 
-With the `image` feature, `ImageData` converts to and from the [`image`](https://crates.io/crates/image) crate's `DynamicImage` — e.g. to save a FITS image as a PNG, or to ingest a raster as FITS. Build with `fitskit = { version = "0.2", features = ["image"] }`.
+With the `image` feature, `ImageData` converts to and from the [`image`](https://crates.io/crates/image) crate's `DynamicImage` — e.g. to save a FITS image as a PNG, or to ingest a raster as FITS. Build with `fitskit = { version = "0.3", features = ["image"] }`.
 
 ```rust
 use fitskit::{FitsFile, HduData, ImageData};

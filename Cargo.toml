@@ -1,6 +1,7 @@
 [package]
 name = "fitskit"
-version = "0.2.0"
+version = "0.3.0"
+rust-version = "1.88"
 edition = "2021"
 description = "Pure Rust FITS v4.0 reader/writer with tile-compression read and write"
 license = "MIT"

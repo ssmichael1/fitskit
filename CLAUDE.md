@@ -22,10 +22,10 @@ Zero external dependencies for core functionality. Optional `image` crate behind
 | `keyword.rs` | `Keyword` struct, `HeaderValue` enum, 80-byte card parse/serialize, CONTINUE handling |
 | `header.rs` | `Header` (ordered keyword vec), typed accessors, block I/O |
 | `io_utils.rs` | Block-aligned reading/writing, padding helpers |
-| `image_data.rs` | `ImageData`, `PixelData` enum, BSCALE/BZERO scaling |
+| `image_data.rs` | `ImageData`, `PixelData` enum, BSCALE/BZERO scaling; big-endian decode/encode via `as_chunks` + streaming `read_from`/`write_to` in 1 MiB chunks |
 | `ascii_table.rs` | `AsciiTable`: TFORMn parsing (Aw/Iw/Fw.d/Ew.d/Dw.d), column access, TSCALn/TZEROn |
 | `bintable.rs` | `BinTable`: all type codes (L,X,B,I,J,K,A,E,D,C,M,P,Q), heap/VLA |
-| `checksum.rs` | CHECKSUM/DATASUM ones-complement computation |
+| `checksum.rs` | CHECKSUM/DATASUM ones-complement computation; `Checksum` streaming accumulator (u64 sum of BE u32 words, folded mod 2^32-1; a u32 accumulator overflows past ~256 KiB) |
 | `tile_compress.rs` | Tiled-image compression. Decode: RICE_1, GZIP_1/2 (feature `gzip`), PLIO_1, HCOMPRESS_1; quantization + subtractive dithering for floats. Encode (`compress_image`/`ImageData::compress`): RICE_1 (int + quantized float) and GZIP_1/2 (int; lossless float via GZIP_1) |
 | `hdu.rs` | `Hdu` struct, `HduData` enum (Empty/Image/AsciiTable/BinTable); `as_compressed_image()` accessor |
 | `fits.rs` | `FitsFile`: top-level read/write, HDU iteration, builder API |
@@ -53,8 +53,16 @@ Zero external dependencies for core functionality. Optional `image` crate behind
 
 1. Build header with mandatory keywords → serialize to 80-byte cards → pad to 2880
 2. Convert native values to big-endian bytes
-3. Pad data to 2880-byte boundary
+3. Pad data to 2880-byte boundary (zeros; ASCII `TABLE` fill is blanks per the standard)
 4. Write header blocks then data blocks per HDU
+
+### I/O performance notes
+
+- Images are decoded straight from the reader (`ImageData::read_from`) and encoded straight to the writer in 1 MiB chunks: no full-size raw byte copy on either side. Tables take ownership of the raw block (`from_header_and_vec`).
+- DATASUM is computed with the streaming `Checksum` accumulator over the same chunks (`Hdu::datasum`), so checksummed writes never materialize the payload. Zero padding contributes nothing to the sum; ASCII-table blank fill is added explicitly.
+- Byte swapping uses `slice::as_chunks::<N>()` (needs Rust ≥ 1.88); the `chunks_exact(N).map(..).collect()` form is 5–10× slower.
+- RICE decode uses a 64-bit buffered `BitReader` (`leading_zeros` for the unary prefix); tile scatter/gather copy contiguous axis-1 runs.
+- `checksum::checksum` matches astropy/cfitsio bit-for-bit. `astropy.io.fits.open(checksum=True)` still warns on fitskit-written files because astropy re-serializes header cards in its own layout before summing; `fitsverify` and a raw-byte sum (see `tests/checksum.rs::assert_raw_checksums_valid`) are the reliable checks.
 
 ## Test Files
 
