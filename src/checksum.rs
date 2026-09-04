@@ -10,22 +10,100 @@ use crate::keyword::HeaderValue;
 
 /// Compute the ones-complement checksum of a byte buffer.
 ///
-/// Treats the data as a sequence of 16-bit big-endian words, accumulated
-/// into hi (even) and lo (odd) 16-bit halves with end-around carry.
+/// Treats the data as a sequence of 32-bit big-endian words summed with
+/// end-around carry (equivalently, 16-bit hi/lo halves with cross carries as
+/// in the checksum proposal). A trailing partial word is zero-padded on the
+/// right, which is exactly what the FITS block padding would contribute.
+///
+/// The sum is accumulated in 64-bit and folded periodically, so it is exact
+/// for arbitrarily large buffers.
 pub fn checksum(data: &[u8]) -> u32 {
-    let mut hi: u32 = 0;
-    let mut lo: u32 = 0;
+    let mut acc = Checksum::new();
+    acc.update(data);
+    acc.finish()
+}
 
-    // Process pairs of big-endian u16 words
-    for chunk in data.chunks(4) {
-        let mut word = [0u8; 4];
-        word[..chunk.len()].copy_from_slice(chunk);
-        hi += ((word[0] as u32) << 8) + word[1] as u32;
-        lo += ((word[2] as u32) << 8) + word[3] as u32;
+/// Incremental FITS checksum over a byte stream.
+///
+/// Feed bytes in any chunking with [`update`](Self::update); the result of
+/// [`finish`](Self::finish) is identical to [`checksum`] over the concatenated
+/// input. Partial 32-bit words at chunk boundaries are carried across calls.
+///
+/// ```
+/// use fitskit::checksum::{checksum, Checksum};
+///
+/// let data: Vec<u8> = (0..10_000u32).map(|i| (i * 7) as u8).collect();
+/// let mut acc = Checksum::new();
+/// for chunk in data.chunks(333) {
+///     acc.update(chunk);
+/// }
+/// assert_eq!(acc.finish(), checksum(&data));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Checksum {
+    /// Running sum, kept below 2^32 between chunks by [`fold32`].
+    sum: u64,
+    /// Bytes of an incomplete trailing word from the previous `update`.
+    pending: [u8; 4],
+    npending: usize,
+}
+
+impl Checksum {
+    /// Fold at least every 2^32 words so the u64 accumulator cannot overflow.
+    /// A 1 MiB chunk (a multiple of 4) keeps the folds negligible and the inner
+    /// loop a plain vectorizable reduction.
+    const CHUNK: usize = 1 << 20;
+
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    let (hi, lo) = fold_carries(hi, lo);
-    (hi << 16) | lo
+    /// Add `data` to the running sum.
+    pub fn update(&mut self, mut data: &[u8]) {
+        if self.npending > 0 {
+            let take = (4 - self.npending).min(data.len());
+            self.pending[self.npending..self.npending + take].copy_from_slice(&data[..take]);
+            self.npending += take;
+            data = &data[take..];
+            if self.npending < 4 {
+                return;
+            }
+            self.sum = fold32(self.sum + u32::from_be_bytes(self.pending) as u64);
+            self.npending = 0;
+        }
+
+        for chunk in data.chunks(Self::CHUNK) {
+            let (words, rem) = chunk.as_chunks::<4>();
+            let chunk_sum: u64 = words.iter().map(|&w| u32::from_be_bytes(w) as u64).sum();
+            self.sum = fold32(self.sum + chunk_sum);
+            // Only the final chunk can have a remainder (CHUNK is a multiple of 4).
+            self.pending[..rem.len()].copy_from_slice(rem);
+            self.npending = rem.len();
+        }
+    }
+
+    /// Finish the sum, zero-padding any trailing partial word.
+    pub fn finish(&self) -> u32 {
+        let mut sum = self.sum;
+        if self.npending > 0 {
+            let mut word = [0u8; 4];
+            word[..self.npending].copy_from_slice(&self.pending[..self.npending]);
+            sum = fold32(sum + u32::from_be_bytes(word) as u64);
+        }
+        sum as u32
+    }
+}
+
+/// Reduce a 64-bit sum to a 32-bit ones-complement value by end-around carry.
+///
+/// The result is `sum mod (2^32 - 1)` in the canonical ones-complement form
+/// where a non-zero multiple of `2^32 - 1` maps to `0xFFFF_FFFF` rather than
+/// `0` (matching the hi/lo fold in the FITS checksum proposal and cfitsio).
+fn fold32(mut sum: u64) -> u64 {
+    while sum >> 32 != 0 {
+        sum = (sum & 0xFFFF_FFFF) + (sum >> 32);
+    }
+    sum
 }
 
 /// Fold end-around carries from the hi/lo accumulators until both are 16-bit.
@@ -162,8 +240,14 @@ pub fn verify_hdu(header_bytes: &[u8], data_bytes: &[u8]) -> bool {
 /// `data_bytes` should be the block-padded data for this HDU.
 /// Returns the serialized header bytes (for use by the caller).
 pub fn stamp_hdu(header: &mut Header, data_bytes: &[u8]) -> Result<Vec<u8>> {
-    // Compute data checksum
-    let dsum = datasum(data_bytes);
+    stamp_hdu_with_datasum(header, datasum(data_bytes))
+}
+
+/// Insert DATASUM and CHECKSUM keywords into a header given a precomputed
+/// data-unit checksum (see [`datasum`] / [`Checksum`]).
+///
+/// Returns the serialized header bytes (for use by the caller).
+pub fn stamp_hdu_with_datasum(header: &mut Header, dsum: u32) -> Result<Vec<u8>> {
     header.set(
         "DATASUM",
         HeaderValue::String(dsum.to_string()),
@@ -207,11 +291,16 @@ pub fn stamp_hdu(header: &mut Header, data_bytes: &[u8]) -> Result<Vec<u8>> {
 /// Reconstructs the header + data bytes and checks the ones-complement sum.
 /// Returns Ok(()) if valid or no checksum keywords present, Err on mismatch.
 pub fn verify_from_header(header: &Header, data_bytes: &[u8]) -> Result<()> {
-    // Check DATASUM if present
+    verify_datasum_value(header, datasum(data_bytes))
+}
+
+/// Verify a precomputed data-unit checksum against the header's DATASUM
+/// keyword. Returns Ok(()) if it matches, if DATASUM is absent/unparseable,
+/// or if the stored value is 0.
+pub fn verify_datasum_value(header: &Header, computed: u32) -> Result<()> {
     if let Some(stored_datasum_str) = header.get_string("DATASUM") {
         if let Ok(stored) = stored_datasum_str.parse::<u64>() {
             let stored = stored as u32;
-            let computed = datasum(data_bytes);
             if stored != 0 && computed != stored {
                 return Err(Error::ChecksumMismatch {
                     expected: stored,
@@ -243,6 +332,46 @@ mod tests {
     fn checksum_zeros() {
         let data = vec![0u8; 2880];
         assert_eq!(checksum(&data), 0);
+    }
+
+    #[test]
+    fn checksum_chunked_matches_whole() {
+        // Pseudo-random bytes, fed through the accumulator in odd-sized pieces
+        // so partial words straddle every boundary.
+        let mut x: u32 = 0x1234_5678;
+        let data: Vec<u8> = (0..100_003)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let whole = checksum(&data);
+        for size in [1usize, 3, 4, 7, 4096, 65_537] {
+            let mut acc = Checksum::new();
+            for c in data.chunks(size) {
+                acc.update(c);
+            }
+            assert_eq!(acc.finish(), whole, "chunk size {size}");
+        }
+        // ones_complement_add on 4-aligned pieces agrees too
+        let (a, b) = data.split_at(40_000);
+        assert_eq!(checksum_accumulate(checksum(a), b), whole);
+    }
+
+    #[test]
+    fn checksum_large_no_overflow() {
+        // 1 MiB of 0xFF: every 16-bit word is 0xFFFF, so the sum of either
+        // half is 0xFFFF * 262144 = 0x3FFF_C000_0 which overflows a u32 accumulator.
+        // Ones-complement: each word contributes 0xFFFF_FFFF == 0 (mod 2^32-1),
+        // and a non-zero multiple maps to all-ones.
+        let data = vec![0xFFu8; 1 << 20];
+        assert_eq!(checksum(&data), 0xFFFF_FFFF);
+        // 1 MiB of 0xAB: 262144 words of 0xABAB_ABAB, reduced mod 2^32-1.
+        let data = vec![0xABu8; 1 << 20];
+        let expected = ((0xABAB_ABABu64 * 262_144) % 0xFFFF_FFFF) as u32;
+        assert_eq!(checksum(&data), expected);
     }
 
     #[test]

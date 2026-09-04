@@ -70,7 +70,7 @@ impl FitsFile {
 
     /// Write to a byte vector with CHECKSUM/DATASUM keywords.
     pub fn to_bytes_with_checksum(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(self.estimated_byte_len());
         self.to_writer_with_checksum(&mut buf)?;
         Ok(buf)
     }
@@ -84,9 +84,25 @@ impl FitsFile {
 
     /// Write to a byte vector.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(self.estimated_byte_len());
         self.to_writer(&mut buf)?;
         Ok(buf)
+    }
+
+    /// Estimate of the serialized size for pre-allocation: padded data units
+    /// plus header blocks sized from the keyword count (with slack for the
+    /// mandatory keywords `write` may add). Long-string CONTINUE cards can push
+    /// a header past this, in which case the buffer simply grows once.
+    fn estimated_byte_len(&self) -> usize {
+        use crate::types::{BLOCK_SIZE, RECORDS_PER_BLOCK};
+        self.hdus
+            .iter()
+            .map(|h| {
+                let cards = h.header.keywords.len() + 8;
+                crate::io_utils::padded_size(h.data_byte_len())
+                    + cards.div_ceil(RECORDS_PER_BLOCK) * BLOCK_SIZE
+            })
+            .sum()
     }
 
     /// Get the primary HDU.

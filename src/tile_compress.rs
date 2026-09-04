@@ -594,8 +594,10 @@ impl<'a> CompressedImage<'a> {
             // Some writers may declare the PLIO list as a byte VLA; reinterpret as
             // big-endian i16 pairs in that case.
             crate::bintable::BinCellValue::Bytes(b) => Ok(b
-                .chunks_exact(2)
-                .map(|c| i16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| i16::from_be_bytes(c))
                 .collect()),
             other => Err(Error::CompressionError(format!(
                 "PLIO_1 COMPRESSED_DATA cell is not an i16 VLA: {other:?}"
@@ -752,17 +754,22 @@ fn scatter_tile(
         origin += coords[axis] * ztile[axis].max(1) * img_stride[axis];
     }
 
-    // Iterate over every pixel of the tile via its multi-index (axis-1 fastest).
+    // Each run along axis 1 is contiguous in both the tile and the image, so
+    // copy a run at a time and step the multi-index over the remaining axes.
+    let row_len = tile_dims.first().copied().unwrap_or(0);
+    if row_len == 0 {
+        return;
+    }
     let tile_npix: usize = tile_dims.iter().product();
     let mut tcoord = vec![0usize; ndim];
-    for &val in values.iter().take(tile_npix) {
+    for row in values[..tile_npix].chunks_exact(row_len) {
         let mut dst = origin;
-        for axis in 0..ndim {
+        for axis in 1..ndim {
             dst += tcoord[axis] * img_stride[axis];
         }
-        full[dst] = val;
-        // Increment the tile multi-index (axis-1 fastest).
-        for axis in 0..ndim {
+        full[dst..dst + row_len].copy_from_slice(row);
+        // Increment the tile multi-index over axes 2..n (axis 2 fastest).
+        for axis in 1..ndim {
             tcoord[axis] += 1;
             if tcoord[axis] < tile_dims[axis] {
                 break;
@@ -870,13 +877,18 @@ fn count_zname_params(header: &Header) -> usize {
 //   * else        -> Rice code: unary leading zeros give the high bits, then `fs`
 //                    low bits; combine as `(nzero << fs) | low`.
 
-/// A simple big-endian-ish MSB-first bit reader over a byte slice.
+/// MSB-first bit reader over a byte slice.
+///
+/// Keeps up to 64 bits buffered so that multi-bit reads and unary
+/// (leading-zero) counts are a couple of shifts rather than per-bit loops.
 struct BitReader<'a> {
     data: &'a [u8],
+    /// Index of the next byte to load into `buffer`.
     byte_pos: usize,
-    /// Number of valid bits remaining in the current `buffer` (0..=8).
+    /// Valid bits live in the low `bits_in_buf` bits of `buffer`, MSB-first;
+    /// the next bit to be consumed is bit `bits_in_buf - 1`.
+    buffer: u64,
     bits_in_buf: u32,
-    buffer: u32,
 }
 
 impl<'a> BitReader<'a> {
@@ -889,52 +901,65 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Read `n` bits (0..=32) MSB-first as an unsigned value.
-    fn read_bits(&mut self, n: u32) -> Result<u32> {
-        let mut result: u32 = 0;
-        let mut need = n;
-        while need > 0 {
-            if self.bits_in_buf == 0 {
-                let b = *self
-                    .data
-                    .get(self.byte_pos)
-                    .ok_or_else(|| Error::CompressionError("RICE: unexpected end of stream".into()))?;
-                self.byte_pos += 1;
-                self.buffer = b as u32;
-                self.bits_in_buf = 8;
+    /// Top up the buffer from the byte stream (whole bytes, up to 64 valid bits).
+    #[inline]
+    fn refill(&mut self) {
+        while self.bits_in_buf <= 56 {
+            match self.data.get(self.byte_pos) {
+                Some(&b) => {
+                    self.buffer = (self.buffer << 8) | b as u64;
+                    self.bits_in_buf += 8;
+                    self.byte_pos += 1;
+                }
+                None => break,
             }
-            let take = need.min(self.bits_in_buf);
-            let shift = self.bits_in_buf - take;
-            let mask = if take == 32 { u32::MAX } else { (1u32 << take) - 1 };
-            let bits = (self.buffer >> shift) & mask;
-            result = (result << take) | bits;
-            self.bits_in_buf -= take;
-            need -= take;
         }
-        Ok(result)
+    }
+
+    #[cold]
+    fn eof() -> Error {
+        Error::CompressionError("RICE: unexpected end of stream".into())
+    }
+
+    /// Read `n` bits (0..=32) MSB-first as an unsigned value.
+    #[inline]
+    fn read_bits(&mut self, n: u32) -> Result<u32> {
+        if n == 0 {
+            return Ok(0);
+        }
+        if self.bits_in_buf < n {
+            self.refill();
+            if self.bits_in_buf < n {
+                return Err(Self::eof());
+            }
+        }
+        self.bits_in_buf -= n;
+        let bits = (self.buffer >> self.bits_in_buf) & ((1u64 << n) - 1);
+        Ok(bits as u32)
     }
 
     /// Count and consume leading zero bits, then consume the terminating one-bit.
     /// Returns the number of zero bits seen.
+    #[inline]
     fn count_leading_zeros(&mut self) -> Result<u32> {
         let mut count = 0u32;
         loop {
             if self.bits_in_buf == 0 {
-                let b = *self
-                    .data
-                    .get(self.byte_pos)
-                    .ok_or_else(|| Error::CompressionError("RICE: unexpected end of stream".into()))?;
-                self.byte_pos += 1;
-                self.buffer = b as u32;
-                self.bits_in_buf = 8;
+                self.refill();
+                if self.bits_in_buf == 0 {
+                    return Err(Self::eof());
+                }
             }
-            // Inspect the top valid bit.
-            let top = (self.buffer >> (self.bits_in_buf - 1)) & 1;
-            self.bits_in_buf -= 1;
-            if top == 1 {
-                return Ok(count);
+            // Left-align the valid window and count zeros with the intrinsic.
+            let window = self.buffer << (64 - self.bits_in_buf);
+            let lz = window.leading_zeros();
+            if lz < self.bits_in_buf {
+                self.bits_in_buf -= lz + 1;
+                return Ok(count + lz);
             }
-            count += 1;
+            // Every buffered bit is zero: consume them all and keep going.
+            count += self.bits_in_buf;
+            self.bits_in_buf = 0;
         }
     }
 }
@@ -1391,14 +1416,19 @@ fn gather_tile<T: Copy>(
     }
     let tile_npix: usize = tile_dims.iter().product();
     let mut out = Vec::with_capacity(tile_npix);
+    let row_len = tile_dims.first().copied().unwrap_or(0);
+    if row_len == 0 {
+        return out;
+    }
+    // Copy one contiguous axis-1 run per iteration (see `scatter_tile`).
     let mut tcoord = vec![0usize; ndim];
-    for _ in 0..tile_npix {
+    for _ in 0..tile_npix / row_len {
         let mut src = origin;
-        for axis in 0..ndim {
+        for axis in 1..ndim {
             src += tcoord[axis] * img_stride[axis];
         }
-        out.push(full[src]);
-        for axis in 0..ndim {
+        out.extend_from_slice(&full[src..src + row_len]);
+        for axis in 1..ndim {
             tcoord[axis] += 1;
             if tcoord[axis] < tile_dims[axis] {
                 break;

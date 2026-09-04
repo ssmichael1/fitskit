@@ -22,14 +22,30 @@ pub fn write_data_block<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
     }
 
     writer.write_all(data)?;
+    write_padding(writer, data.len(), 0)
+}
 
-    let remainder = data.len() % BLOCK_SIZE;
-    if remainder != 0 {
-        let padding = BLOCK_SIZE - remainder;
-        let zeros = vec![0u8; padding];
-        writer.write_all(&zeros)?;
+/// Write the padding that follows `data_len` bytes of data so the total
+/// reaches the next block boundary. `fill` is 0 for images and binary
+/// tables, and ASCII blank (0x20) for ASCII tables, per the standard.
+pub fn write_padding<W: Write>(writer: &mut W, data_len: usize, fill: u8) -> Result<()> {
+    static ZEROS: [u8; BLOCK_SIZE] = [0u8; BLOCK_SIZE];
+    static BLANKS: [u8; BLOCK_SIZE] = [b' '; BLOCK_SIZE];
+    let padding = padded_size(data_len) - data_len;
+    if padding != 0 {
+        let block = if fill == b' ' { &BLANKS } else { &ZEROS };
+        debug_assert!(fill == 0 || fill == b' ');
+        writer.write_all(&block[..padding])?;
     }
+    Ok(())
+}
 
+/// Skip the block padding that follows `data_len` bytes of data.
+pub fn skip_padding<R: Read + Seek>(reader: &mut R, data_len: usize) -> Result<()> {
+    let padding = padded_size(data_len) - data_len;
+    if padding != 0 {
+        reader.seek(SeekFrom::Current(padding as i64))?;
+    }
     Ok(())
 }
 

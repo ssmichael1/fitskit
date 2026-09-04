@@ -102,6 +102,12 @@ pub struct AsciiTable {
 impl AsciiTable {
     /// Read column definitions from header and raw data.
     pub fn from_header_and_data(header: &Header, data: &[u8]) -> Result<Self> {
+        Self::from_header_and_vec(header, data.to_vec())
+    }
+
+    /// Read column definitions from header and an owned raw data buffer,
+    /// which is used directly as the table storage (no copy).
+    pub fn from_header_and_vec(header: &Header, data: Vec<u8>) -> Result<Self> {
         let nrows = header.require_int("NAXIS2")? as usize;
         let row_len = header.require_int("NAXIS1")? as usize;
         let tfields = header.require_int("TFIELDS")? as usize;
@@ -140,7 +146,7 @@ impl AsciiTable {
             columns,
             nrows,
             row_len,
-            raw_data: data.to_vec(),
+            raw_data: data,
         })
     }
 

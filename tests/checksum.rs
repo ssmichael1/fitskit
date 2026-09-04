@@ -1,3 +1,4 @@
+use fitskit::ascii_table::{AsciiColumn, AsciiFormat};
 use fitskit::checksum;
 use fitskit::*;
 
@@ -108,5 +109,86 @@ fn checksum_encode_decode_all_byte_values() {
         );
         let decoded = checksum::decode_checksum(&encoded, false);
         assert_eq!(decoded, val, "round-trip failed for {val:#010x}");
+    }
+}
+
+/// Locate each HDU in `bytes` and check that the ones-complement sum of its
+/// full header+data bytes is all-ones (the CHECKSUM invariant), and that the
+/// stored DATASUM matches the padded data unit. This is the check `fitsverify`
+/// performs, done on the raw bytes rather than through fitskit's own parser.
+fn assert_raw_checksums_valid(bytes: &[u8]) -> usize {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut n = 0;
+    while (cursor.position() as usize) < bytes.len() {
+        let start = cursor.position() as usize;
+        let header = Header::read_from(&mut cursor).unwrap();
+        let hdr_end = cursor.position() as usize;
+        let data_len = header.data_byte_count().unwrap();
+        let padded = data_len.div_ceil(2880) * 2880;
+        let data = &bytes[hdr_end..hdr_end + padded];
+        let stored: u32 = header.get_string("DATASUM").unwrap().parse().unwrap();
+        assert_eq!(checksum::datasum(data), stored, "DATASUM of HDU {n}");
+        assert!(
+            checksum::verify_hdu(&bytes[start..hdr_end], data),
+            "CHECKSUM of HDU {n} does not sum to all-ones"
+        );
+        cursor.set_position((hdr_end + padded) as u64);
+        n += 1;
+    }
+    n
+}
+
+#[test]
+fn raw_hdu_checksums_all_types() {
+    // Image sizes chosen so data units need non-trivial padding and exceed the
+    // ~256 KiB at which a 32-bit accumulator would overflow.
+    let n = 700usize;
+    let mut fits = FitsFile::with_primary_image(ImageData::new(
+        vec![n, n],
+        PixelData::F32((0..n * n).map(|i| -(i as f32) * 1e30).collect()),
+    ));
+    fits.push_extension(Hdu::image_extension(ImageData::new(
+        vec![301, 5],
+        PixelData::I16((0..1505).map(|i| (i as i16).wrapping_mul(-7)).collect()),
+    )));
+    let mut b = BinTableBuilder::new()
+        .add_column("X", BinColumnType::D64(1))
+        .add_column("S", BinColumnType::Char(3));
+    for i in 0..1001 {
+        b = b.push_row(|r| {
+            r.write_f64(i as f64 * 1e300);
+            r.write_string("abc", 3);
+        });
+    }
+    fits.push_extension(Hdu::bintable_extension(b.build()));
+    // ASCII table: 3 rows of 11 chars -> 33 bytes of data, 2847 bytes of blank fill
+    let cols = vec![AsciiColumn {
+        name: "V".into(),
+        format: AsciiFormat::parse("F10.3").unwrap(),
+        tbcol: 1,
+        tscal: 1.0,
+        tzero: 0.0,
+        tunit: None,
+    }];
+    let rows = b"   1.500   -2.250   3.125 ".to_vec();
+    fits.push_extension(Hdu::ascii_table_extension(AsciiTable::build(cols, 3, rows)));
+
+    let bytes = fits.to_bytes_with_checksum().unwrap();
+    assert_eq!(assert_raw_checksums_valid(&bytes), 4);
+
+    // ASCII table fill must be blanks, everything else zeros.
+    let reread = FitsFile::from_bytes(&bytes).unwrap();
+    let mut off = 0;
+    for (i, hdu) in reread.iter().enumerate() {
+        let mut hb = Vec::new();
+        hdu.header.write_to(&mut hb).unwrap();
+        off += hb.len();
+        let len = hdu.data_byte_len();
+        let padded = len.div_ceil(2880) * 2880;
+        let fill = &bytes[off + len..off + padded];
+        let expect = if i == 3 { b' ' } else { 0 };
+        assert!(fill.iter().all(|&b| b == expect), "HDU {i} fill byte");
+        off += padded;
+        hdu.verify_datasum().unwrap();
     }
 }
