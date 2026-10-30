@@ -259,6 +259,13 @@ impl Hdu {
             HduData::BinTable(table) => table.fill_header(&mut header),
         }
 
+        // Copy original header keywords
+        for kw in self.header.keywords.iter() {
+            if let Some(value) = &kw.value {
+                header.set(&kw.name, value.clone(), kw.comment.as_deref());
+            }
+        }
+
         if with_checksum {
             let header_bytes = checksum::stamp_hdu_with_datasum(&mut header, self.datasum())?;
             writer.write_all(&header_bytes)?;
