@@ -523,3 +523,59 @@ fn header_keyword_preservation() {
         .collect();
     assert_eq!(history.len(), 1);
 }
+
+#[test]
+fn compressed_image_tform1_maxlen_survives_fitsfile_serialization() {
+    let pixels: Vec<f32> = (0..(32 * 8))
+        .map(|i| {
+            let x = (i % 32) as f32;
+            let y = (i / 32) as f32;
+            (x * 0.75) - (y * 1.25)
+        })
+        .collect();
+    let img = ImageData::new(vec![32, 8], PixelData::F32(pixels));
+
+    let opts = CompressOptions {
+        algorithm: CompressionType::Rice1,
+        quantize: Some(4.0),
+        dither: Quantize::SubtractiveDither1,
+        dither_seed: Some(1),
+        ..Default::default()
+    };
+
+    let compressed = img.compress(&opts).expect("compress image");
+
+    let expected_tform1 = compressed
+        .header
+        .get_string("TFORM1")
+        .expect("compressed HDU should set TFORM1")
+        .to_owned();
+    assert!(
+        expected_tform1.starts_with("1PB("),
+        "expected explicit VLA max length in TFORM1, got {expected_tform1:?}"
+    );
+
+    let mut fits = FitsFile::with_empty_primary();
+    fits.push_extension(compressed);
+
+    let bytes = fits.to_bytes().expect("serialize FITS");
+    let reread = FitsFile::from_bytes(&bytes).expect("parse FITS");
+
+    assert_eq!(reread.len(), 2);
+    assert_eq!(reread.extensions()[0].header.get_bool("ZIMAGE"), Some(true));
+
+    let got_tform1 = reread.extensions()[0]
+        .header
+        .get_string("TFORM1")
+        .expect("serialized compressed HDU should preserve TFORM1");
+
+    assert_eq!(got_tform1, expected_tform1);
+
+    let decompressed = reread.extensions()[0]
+        .as_compressed_image()
+        .expect("compressed image extension")
+        .decompress()
+        .expect("decompress serialized image");
+
+    assert_eq!(decompressed.axes, vec![32, 8]);
+}
