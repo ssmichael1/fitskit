@@ -548,7 +548,8 @@ fn compressed_image_tform1_maxlen_survives_fitsfile_serialization() {
     let expected_tform1 = compressed
         .header
         .get_string("TFORM1")
-        .expect("compressed HDU should set TFORM1").to_owned();
+        .expect("compressed HDU should set TFORM1")
+        .to_owned();
     assert!(
         expected_tform1.starts_with("1PB("),
         "expected explicit VLA max length in TFORM1, got {expected_tform1:?}"
